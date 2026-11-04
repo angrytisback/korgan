@@ -1,0 +1,118 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  SQLX_OFFLINE: "true"
+
+jobs:
+  lint:
+    name: Quality & Architectural Gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: swatinem/rust-cache@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Check code formatting (cargo fmt)
+        run: cargo fmt --all -- --check
+
+      - name: Run static analysis (cargo clippy)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Verify Hexagonal boundaries & Zero-Panic guarantee
+        run: python3 scripts/check_boundaries.py
+
+  audit:
+    name: Security & License Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
+      - name: Scan Cargo.lock for CVEs and yanked crates
+        run: cargo audit --deny warnings
+
+      - name: Check supply-chain bans, licenses, and advisories
+        run: cargo deny check
+
+  test:
+    name: Test Suite (Postgres 17 & Redis 8)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: iam
+          POSTGRES_PASSWORD: iam_dev_password
+          POSTGRES_DB: iam
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://iam:iam_dev_password@localhost:5432/iam
+      REDIS_URL: redis://localhost:6379
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: swatinem/rust-cache@v2
+
+      - name: Run complete test suite
+        run: cargo test --all-targets -- --nocapture
+
+      - name: Run documentation tests
+        run: cargo test --doc

@@ -1,0 +1,45 @@
+# Build and Compilation Artifacts
+target/
+*.rlib
+*.so
+*.dylib
+*.dll
+
+# Environment and Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.cert
+*.crt
+
+# Internal Agent Workspaces & Scratchpad
+.agents/
+
+# IDE and Editor Metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+
+# Operating System Junk
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs and Run-time Artifacts
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
