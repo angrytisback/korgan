@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH deleted AS (\n                DELETE FROM sessions\n                WHERE id IN (\n                    SELECT id FROM sessions\n                    WHERE expires_at < NOW()\n                    LIMIT $1\n                )\n                RETURNING id\n            )\n            SELECT count(*) AS \"count!\" FROM deleted\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0421bce2f91ef7747e56f7857c41560da9534ce5269411856133d0dcba182394"
+}

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE sessions SET\n                is_replaced = $2,\n                last_active_at = $3,\n                revoked_at = $4,\n                revoke_reason = $5\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool",
+        "Timestamptz",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "57c289cb65e93f839dab65b998ca0123ecb592921bc6aa57b8cf4ac623360b63"
+}

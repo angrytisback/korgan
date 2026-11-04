@@ -1,0 +1,137 @@
+# =============================================================================
+# Korgan - default configuration
+#
+# This file is embedded into the binary at compile time and provides the base
+# layer. It is overridden (in order) by:
+#   1. an optional file whose path is given by `KORGAN_CONFIG_FILE`
+#   2. `.env` / process environment variables:
+#        KORGAN__<SECTION>__<KEY>   e.g. KORGAN__SERVER__PORT=9090
+#      plus the short aliases DATABASE_URL, REDIS_URL, MAIL_PROVIDER,
+#      HIBP_ENABLED and TOKEN_DELIVERY_MODE.
+#
+# SECRETS MUST NEVER BE COMMITTED HERE. The following keys have no default and
+# are REQUIRED from the environment:
+#   database.url, redis.url,
+#   crypto.ed25519_private_key_pem, crypto.aes_master_key
+# =============================================================================
+
+[server]
+host = "0.0.0.0"
+port = 8080
+# "development" | "production" - production enables stricter validation.
+environment = "development"
+# Externally reachable base URL, used to build links in e-mails.
+public_base_url = "http://localhost:8080"
+# Exact origins allowed by CORS (credentials are enabled, so no wildcards).
+cors_allowed_origins = ["http://localhost:3000"]
+request_body_limit_bytes = 1048576
+request_timeout_secs = 30
+shutdown_grace_secs = 30
+
+[telemetry]
+# "pretty" (local development) | "json" (production / log shippers)
+log_format = "pretty"
+# Used when RUST_LOG is not set.
+log_filter = "info,korgan=debug,tower_http=info,sqlx=warn"
+
+[database]
+# url = <required, secret>
+max_connections = 20
+min_connections = 2
+acquire_timeout_secs = 5
+idle_timeout_secs = 600
+run_migrations = true
+
+[redis]
+# url = <required, secret>
+pool_size = 16
+connect_timeout_secs = 5
+key_prefix = "korgan"
+
+[crypto]
+# Argon2id (OWASP ASVS 2.4.x minimums: >= 19 MiB, >= 2 iterations, >= 1 lane).
+argon2_memory_kib = 19456
+argon2_iterations = 2
+argon2_parallelism = 1
+# Maximum concurrent Argon2id operations to prevent CPU starvation and OOM.
+argon2_max_concurrency = 16
+# Identifier published as `kid` in the JWKS document and JWT header.
+ed25519_key_id = "korgan-key-1"
+# ed25519_private_key_pem = <required, secret, PKCS#8 PEM; "\n" escapes allowed>
+# aes_master_key = <required, secret, standard Base64 of exactly 32 bytes>
+
+[auth]
+issuer = "http://localhost:8080"
+audience = "korgan"
+# "dual" | "header_only" | "cookie_only"
+token_delivery_mode = "dual"
+access_token_ttl_secs = 900
+refresh_token_ttl_secs = 2592000
+email_verification_ttl_secs = 86400
+password_reset_ttl_secs = 3600
+mfa_challenge_ttl_secs = 300
+max_failed_login_attempts = 5
+lockout_duration_secs = 900
+password_history_depth = 5
+account_deletion_grace_days = 30
+# Optional `Domain` attribute for auth cookies (host-only when unset).
+# cookie_domain = "example.com"
+
+[mail]
+# "console" | "smtp" | "resend" | "ses"
+provider = "console"
+from_address = "no-reply@korgan.local"
+from_name = "Korgan"
+
+[mail.smtp]
+host = "localhost"
+port = 1025
+# "none" | "starttls" | "tls"
+tls = "none"
+# username = "..."
+# password = "..."   (secret)
+
+[mail.resend]
+api_url = "https://api.resend.com"
+# api_key = "..."    (secret, required when provider = "resend")
+
+[mail.ses]
+# region = "eu-west-1"
+# access_key_id = "..."
+# secret_access_key = "..."   (secret)
+
+[hibp]
+# Have I Been Pwned k-Anonymity range API (NIST SP 800-63B Section 5.1.1.2).
+enabled = true
+api_url = "https://api.pwnedpasswords.com"
+timeout_secs = 3
+# When the HIBP service is unreachable: true = allow, false = reject.
+fail_open = true
+
+[rate_limit]
+enabled = true
+window_secs = 60
+global_max_requests = 600
+login_max_requests = 10
+register_max_requests = 5
+forgot_password_max_requests = 5
+mfa_max_requests = 10
+# Only enable behind a trusted reverse proxy that sets X-Forwarded-For.
+trust_proxy_headers = false
+
+[oauth.google]
+enabled = false
+redirect_uri = "http://localhost:8080/api/v1/auth/oauth/google/callback"
+# client_id = "..."
+# client_secret = "..."
+
+[oauth.github]
+enabled = false
+redirect_uri = "http://localhost:8080/api/v1/auth/oauth/github/callback"
+# client_id = "..."
+# client_secret = "..."
+
+[webauthn]
+rp_id = "localhost"
+rp_origin = "http://localhost:8080"
+

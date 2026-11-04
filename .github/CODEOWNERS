@@ -1,0 +1,12 @@
+# Global code owners
+* @eigen
+
+# Core security & cryptography critical paths
+/src/domain/ @eigen
+/src/adapters/outbound/crypto/ @eigen
+/migrations/ @eigen
+/.sqlx/ @eigen
+
+# CI/CD and release automation
+/.github/ @eigen
+/Dockerfile @eigen
