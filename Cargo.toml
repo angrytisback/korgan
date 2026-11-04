@@ -1,0 +1,80 @@
+[package]
+name = "korgan"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Enterprise-grade, self-hosted Identity and Access Management (IAM) & User Management API"
+license = "AGPL-3.0-only"
+authors = ["Eigen <eigen@teapot-dev.com>"]
+publish = false
+
+[dependencies]
+aes-gcm = "0.11.1"
+argon2 = "0.6.0"
+async-trait = "0.1.92"
+axum = { version = "0.8.9", features = ["macros", "multipart", "ws"] }
+axum-extra = { version = "0.12.6", features = ["typed-header", "cookie"] }
+base64 = "0.23.1"
+chrono = { version = "0.4.45", features = ["serde"] }
+config = "0.15.27"
+cookie = "0.18"
+deadpool-redis = "0.23.1"
+dotenvy = "0.15.7"
+ed25519-dalek = { version = "3.0.0", features = ["rand_core", "pkcs8", "pem"] }
+hmac = "0.13.0"
+http = "1.5.0"
+ipnetwork = "0.21.1"
+lettre = { version = "0.11.23", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+password-hash = "0.6.1"
+qrcode = "0.14.1"
+rand = "0.10.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "form"] }
+secrecy = { version = "0.10.3", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha1 = "0.10.7"
+sha2 = "0.11.1"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "ipnetwork", "json", "migrate", "macros"] }
+subtle = "2.6.1"
+thiserror = "2.0.21"
+tokio = { version = "1.54.0", features = ["full"] }
+totp-rs = { version = "6.0.0", features = ["qr", "gen_secret", "otpauth"] }
+tower = { version = "0.5.3", features = ["util"] }
+tower-http = { version = "0.7.1", features = ["trace", "cors", "request-id", "sensitive-headers", "limit", "catch-panic", "timeout", "set-header", "util"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+unicode-normalization = "0.1.26"
+utoipa = { version = "6.0.0", features = ["axum_extras", "uuid", "chrono"] }
+utoipa-scalar = { version = "0.4.0", features = ["axum"] }
+url = "2.5.8"
+uuid = { version = "1.28.0", features = ["v7", "serde"] }
+validator = { version = "0.21.0", features = ["derive"] }
+webauthn-rs = { version = "0.5.5", default-features = false, features = ["attestation", "conditional-ui", "danger-allow-state-serialisation"] }
+zeroize = { version = "1.9.1", features = ["derive"] }
+libc = "0.2"
+metrics = "0.24.6"
+metrics-exporter-prometheus = "0.18.3"
+clap = { version = "4.6.7", features = ["derive"] }
+
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unused_must_use = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "warn"
+print_stderr = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+

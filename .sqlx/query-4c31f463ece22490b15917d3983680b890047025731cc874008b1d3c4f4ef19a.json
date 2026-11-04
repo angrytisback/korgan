@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                user_id,\n                totp_secret_ciphertext,\n                totp_secret_nonce,\n                backup_code_hashes,\n                verified_at,\n                updated_at\n            FROM user_mfa\n            WHERE user_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "user_mfa",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "totp_secret_ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "user_mfa",
+            "name": "totp_secret_ciphertext"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "totp_secret_nonce",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "user_mfa",
+            "name": "totp_secret_nonce"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "backup_code_hashes",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "user_mfa",
+            "name": "backup_code_hashes"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "verified_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_mfa",
+            "name": "verified_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_mfa",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "4c31f463ece22490b15917d3983680b890047025731cc874008b1d3c4f4ef19a"
+}
