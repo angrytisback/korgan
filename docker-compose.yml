@@ -1,0 +1,114 @@
+name: korgan
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: korgan-postgres
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-korgan}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-korgan_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-korgan}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-korgan} -d ${POSTGRES_DB:-korgan}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: korgan-valkey
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    command: ["valkey-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: korgan-mailpit
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    ports:
+      - "1025:1025" # SMTP
+      - "8025:8025" # Web UI
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: korgan
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    profiles: ["app", "full"]
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-korgan}:${POSTGRES_PASSWORD:-korgan_dev_password}@postgres:5432/${POSTGRES_DB:-korgan}
+      REDIS_URL: redis://valkey:6379
+      KORGAN__SERVER__HOST: 0.0.0.0
+      KORGAN__SERVER__PORT: 8080
+      KORGAN__SERVER__ENVIRONMENT: development
+      KORGAN__SERVER__PUBLIC_BASE_URL: http://localhost:8080
+      KORGAN__AUTH__ISSUER: http://localhost:8080
+      KORGAN__AUTH__AUDIENCE: korgan
+      KORGAN__CRYPTO__ED25519_PRIVATE_KEY_PEM: ${KORGAN__CRYPTO__ED25519_PRIVATE_KEY_PEM}
+      KORGAN__CRYPTO__AES_MASTER_KEY: ${KORGAN__CRYPTO__AES_MASTER_KEY}
+      MAIL_PROVIDER: smtp
+      KORGAN__MAIL__SMTP__HOST: mailpit
+      KORGAN__MAIL__SMTP__PORT: 1025
+      KORGAN__MAIL__SMTP__TLS: none
+      TOKEN_DELIVERY_MODE: ${TOKEN_DELIVERY_MODE:-dual}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  valkey_data:
