@@ -120,6 +120,19 @@ impl Session {
         self.revoked_at.is_some()
     }
 
+    /// Returns `true` if this session was rotated/replaced within the given `grace_period`.
+    ///
+    /// Protects against false-positive token family revocation caused by concurrent
+    /// browser tab refresh requests presenting the same token before receiving the new cookie.
+    #[must_use]
+    pub fn is_replaced_within_grace(&self, now: DateTime<Utc>, grace_period: Duration) -> bool {
+        if !self.is_replaced {
+            return false;
+        }
+        let elapsed = now.signed_duration_since(self.last_active_at);
+        elapsed >= Duration::seconds(-1) && elapsed <= grace_period
+    }
+
     /// Rotates this session into a new child session within the same `token_family_id`.
     ///
     /// The current session is marked as `is_replaced = true`.
@@ -230,5 +243,63 @@ mod tests {
         assert!(child.is_revoked());
         assert!(!child.is_valid(now));
         assert_eq!(child.revoke_reason.as_deref(), Some("user_logout"));
+    }
+
+    #[test]
+    fn session_replacement_grace_period() {
+        let user_id = UserId::new();
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+        let ttl = Duration::days(30);
+
+        let mut session = Session::new(
+            user_id,
+            "hash_1".to_owned(),
+            ip,
+            Some("Mozilla/5.0".to_owned()),
+            Some("MacBook Pro".to_owned()),
+            ttl,
+        );
+
+        let now = Utc::now();
+        let grace = Duration::seconds(10);
+
+        // Not replaced yet: grace check returns false
+        assert!(!session.is_replaced_within_grace(now, grace));
+
+        // Rotate session
+        let _child = session.rotate(
+            "hash_2".to_owned(),
+            ttl,
+            now,
+            ip,
+            Some("Mozilla/5.0".to_owned()),
+        );
+        assert!(session.is_replaced);
+
+        // Immediate check: within grace
+        assert!(session.is_replaced_within_grace(now, grace));
+
+        // 5 seconds later: within grace
+        let five_sec_later = now + Duration::seconds(5);
+        assert!(session.is_replaced_within_grace(five_sec_later, grace));
+
+        // Exactly 10 seconds later: within grace
+        let ten_sec_later = now + Duration::seconds(10);
+        assert!(session.is_replaced_within_grace(ten_sec_later, grace));
+
+        // 11 seconds later: expired grace window
+        let eleven_sec_later = now + Duration::seconds(11);
+        assert!(!session.is_replaced_within_grace(eleven_sec_later, grace));
+
+        // Clock skew tolerance: up to -1 second is accepted
+        let skew_half_sec_earlier = now - Duration::milliseconds(500);
+        assert!(session.is_replaced_within_grace(skew_half_sec_earlier, grace));
+
+        let skew_exact_one_sec_earlier = now - Duration::seconds(1);
+        assert!(session.is_replaced_within_grace(skew_exact_one_sec_earlier, grace));
+
+        // Clock skew beyond -1 second rejected
+        let skew_too_early = now - Duration::seconds(2);
+        assert!(!session.is_replaced_within_grace(skew_too_early, grace));
     }
 }

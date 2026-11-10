@@ -168,7 +168,7 @@ impl AppState {
             access_token_ttl: Duration::from_secs(settings.auth.access_token_ttl_secs),
             refresh_token_ttl: Duration::from_secs(settings.auth.refresh_token_ttl_secs),
             mfa_ticket_ttl: Duration::from_secs(settings.auth.mfa_challenge_ttl_secs),
-            jwt_issuer: settings.server.public_base_url.clone(),
+            jwt_issuer: settings.auth.issuer.clone(),
             jwt_audience: settings.auth.audience.clone(),
         };
 
@@ -191,7 +191,7 @@ impl AppState {
             event_bus.clone(),
             Duration::from_secs(settings.auth.access_token_ttl_secs),
             Duration::from_secs(settings.auth.refresh_token_ttl_secs),
-            settings.server.public_base_url.clone(),
+            settings.auth.issuer.clone(),
             settings.auth.audience.clone(),
         );
 
@@ -216,7 +216,7 @@ impl AppState {
             event_bus.clone(),
             Duration::from_secs(settings.auth.access_token_ttl_secs),
             Duration::from_secs(settings.auth.refresh_token_ttl_secs),
-            settings.server.public_base_url.clone(),
+            settings.auth.issuer.clone(),
             settings.auth.audience.clone(),
         );
 
@@ -251,7 +251,7 @@ impl AppState {
             event_bus.clone(),
             Duration::from_secs(settings.auth.access_token_ttl_secs),
             Duration::from_secs(settings.auth.refresh_token_ttl_secs),
-            settings.server.public_base_url.clone(),
+            settings.auth.issuer.clone(),
             settings.auth.audience.clone(),
         );
 
@@ -318,7 +318,7 @@ impl AppState {
             event_bus.clone(),
             Duration::from_secs(settings.auth.access_token_ttl_secs),
             Duration::from_secs(settings.auth.refresh_token_ttl_secs),
-            settings.server.public_base_url.clone(),
+            settings.auth.issuer.clone(),
             settings.auth.audience.clone(),
             settings.auth.max_failed_login_attempts,
             Duration::from_secs(settings.auth.lockout_duration_secs),

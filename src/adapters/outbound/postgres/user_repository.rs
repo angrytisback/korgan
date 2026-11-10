@@ -227,6 +227,37 @@ impl UserRepository for PostgresUserRepository {
         Ok(())
     }
 
+    async fn update_username(
+        &self,
+        user_id: &UserId,
+        new_username: Option<&Username>,
+    ) -> Result<(), PortError> {
+        let user_uuid = user_id.to_uuid();
+        let username_str = new_username.map(|u| u.as_str());
+        let now = Utc::now();
+
+        let result = sqlx::query(
+            r#"
+            UPDATE users SET
+                username = $2,
+                updated_at = $3
+            WHERE id = $1
+            "#,
+        )
+        .bind(user_uuid)
+        .bind(username_str)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Self::map_sqlx_error(e, "update_username"))?;
+
+        if result.rows_affected() == 0 {
+            return Err(PortError::not_found("user"));
+        }
+
+        Ok(())
+    }
+
     async fn update_password(
         &self,
         user_id: &UserId,
@@ -400,6 +431,72 @@ impl UserRepository for PostgresUserRepository {
         .execute(&self.pool)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "save_mfa"))?;
+
+        Ok(())
+    }
+
+    async fn enable_mfa(&self, mfa: &UserMfa) -> Result<(), PortError> {
+        let user_uuid = mfa.user_id.to_uuid();
+        let now = Utc::now();
+
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            PortError::database(format!("failed to begin enable_mfa transaction: {e}"))
+        })?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO user_mfa (
+                user_id,
+                key_id,
+                totp_secret_ciphertext,
+                totp_secret_nonce,
+                backup_code_hashes,
+                verified_at,
+                updated_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7
+            )
+            ON CONFLICT (user_id) DO UPDATE SET
+                key_id = EXCLUDED.key_id,
+                totp_secret_ciphertext = EXCLUDED.totp_secret_ciphertext,
+                totp_secret_nonce = EXCLUDED.totp_secret_nonce,
+                backup_code_hashes = EXCLUDED.backup_code_hashes,
+                verified_at = EXCLUDED.verified_at,
+                updated_at = EXCLUDED.updated_at
+            "#,
+        )
+        .bind(user_uuid)
+        .bind(&mfa.key_id)
+        .bind(&mfa.totp_secret_ciphertext)
+        .bind(&mfa.totp_secret_nonce)
+        .bind(&mfa.backup_code_hashes)
+        .bind(mfa.verified_at)
+        .bind(mfa.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Self::map_sqlx_error(e, "enable_mfa: upsert user_mfa"))?;
+
+        let user_result = sqlx::query(
+            r#"
+            UPDATE users SET
+                mfa_enabled = true,
+                updated_at = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(user_uuid)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Self::map_sqlx_error(e, "enable_mfa: update users.mfa_enabled"))?;
+
+        if user_result.rows_affected() == 0 {
+            return Err(PortError::not_found("user"));
+        }
+
+        tx.commit().await.map_err(|e| {
+            PortError::database(format!("failed to commit enable_mfa transaction: {e}"))
+        })?;
 
         Ok(())
     }

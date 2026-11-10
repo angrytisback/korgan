@@ -1,4 +1,4 @@
-//! End-to-end tests of the Phase 1 HTTP foundation: routing, RFC 9457 error
+//! End-to-end tests of the HTTP foundation: routing, RFC 9457 error
 //! contract, correlation ids and security headers.
 
 use std::collections::HashMap;

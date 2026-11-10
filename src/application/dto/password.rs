@@ -4,7 +4,7 @@ use std::net::IpAddr;
 
 use validator::Validate;
 
-use crate::domain::value_objects::{RequestId, UserId};
+use crate::domain::value_objects::{RequestId, SessionId, UserId};
 
 /// Command to request a password reset e-mail.
 #[derive(Debug, Clone, Validate)]
@@ -65,6 +65,9 @@ impl std::fmt::Debug for ResetPasswordCommand {
 pub struct ChangePasswordCommand {
     /// Authenticated caller identifier.
     pub user_id: UserId,
+
+    /// Optional session identifier to exempt caller's current session from revocation.
+    pub current_session_id: Option<SessionId>,
 
     /// Current plaintext password to verify authority.
     #[validate(length(min = 1, message = "current password must not be empty"))]

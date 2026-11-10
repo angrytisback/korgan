@@ -4,6 +4,11 @@ target/
 *.so
 *.dylib
 *.dll
+*.bundle
+*.zip
+*.tar.*
+*.tar.gz
+*.tgz
 
 # Environment and Secrets
 .env
@@ -16,6 +21,13 @@ target/
 *.cert
 *.crt
 
+
+# Database Dumps and Local Storage
+*.db
+*.rdb
+*.sqlite
+*.sqlite3
+dump.rdb
 
 # IDE and Editor Metadata
 .idea/

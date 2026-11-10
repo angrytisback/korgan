@@ -160,7 +160,7 @@ impl User {
     /// # Errors
     ///
     /// Returns [`DomainError::AccountLocked`] if temporarily locked, or
-    /// [`DomainError::AccountNotActive`] if status is not `Active` or `Unverified`.
+    /// [`DomainError::AccountNotActive`] if status is not `Active`.
     pub fn can_login(&self, now: DateTime<Utc>) -> Result<(), DomainError> {
         if let Some(until) = self.locked_until
             && until > now
@@ -169,7 +169,7 @@ impl User {
         }
 
         match self.status {
-            AccountStatus::Active | AccountStatus::Unverified => Ok(()),
+            AccountStatus::Active => Ok(()),
             other => Err(DomainError::AccountNotActive {
                 status: other.to_string(),
             }),
@@ -301,12 +301,13 @@ mod tests {
         assert!(!user.mfa_enabled);
 
         let now = Utc::now();
-        assert!(user.can_login(now).is_ok());
+        assert!(user.can_login(now).is_err());
 
         // Verify email activates account
         user.verify_email(now);
         assert_eq!(user.status, AccountStatus::Active);
         assert_eq!(user.email_verified_at, Some(now));
+        assert!(user.can_login(now).is_ok());
 
         // MFA toggles
         user.enable_mfa(now);

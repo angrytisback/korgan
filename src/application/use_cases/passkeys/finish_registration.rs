@@ -66,7 +66,7 @@ impl FinishPasskeyRegistrationUseCase {
     ) -> Result<PasskeyRegistrationFinishResult, AppError> {
         cmd.validate()?;
 
-        let cache_key = format!("passkey:reg:{}", cmd.challenge_id);
+        let cache_key = format!("passkey:reg:{user_id}:{}", cmd.challenge_id);
         let state_json = self
             .token_store
             .get_and_delete(&cache_key)

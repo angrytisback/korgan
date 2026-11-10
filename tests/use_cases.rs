@@ -113,6 +113,41 @@ impl UserRepository for MockUserRepository {
         Ok(())
     }
 
+    async fn update_username(
+        &self,
+        user_id: &UserId,
+        new_username: Option<&Username>,
+    ) -> Result<(), PortError> {
+        let mut users = self
+            .users
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        let mut usernames = self
+            .usernames
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        let user = users
+            .get_mut(user_id)
+            .ok_or_else(|| PortError::not_found("user"))?;
+
+        if let Some(ref old_uname) = user.username {
+            usernames.remove(old_uname.as_str());
+        }
+        if let Some(new_uname) = new_username {
+            if let Some(existing_id) = usernames.get(new_uname.as_str())
+                && existing_id != user_id
+            {
+                return Err(PortError::conflict("username taken"));
+            }
+            usernames.insert(new_uname.to_string(), *user_id);
+            user.username = Some(new_uname.clone());
+        } else {
+            user.username = None;
+        }
+        user.updated_at = Utc::now();
+        Ok(())
+    }
+
     async fn update_password(
         &self,
         user_id: &UserId,
@@ -173,12 +208,38 @@ impl UserRepository for MockUserRepository {
         Ok(())
     }
 
+    async fn enable_mfa(&self, mfa: &UserMfa) -> Result<(), PortError> {
+        let mut mfa_map = self
+            .mfa
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        let mut users = self
+            .users
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        let user = users
+            .get_mut(&mfa.user_id)
+            .ok_or_else(|| PortError::not_found("user"))?;
+        user.mfa_enabled = true;
+        user.updated_at = Utc::now();
+        mfa_map.insert(mfa.user_id, mfa.clone());
+        Ok(())
+    }
+
     async fn delete_mfa(&self, user_id: &UserId) -> Result<(), PortError> {
         let mut map = self
             .mfa
             .lock()
             .map_err(|e| PortError::database(e.to_string()))?;
         map.remove(user_id);
+        let mut users = self
+            .users
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        if let Some(user) = users.get_mut(user_id) {
+            user.mfa_enabled = false;
+            user.updated_at = Utc::now();
+        }
         Ok(())
     }
 
@@ -728,6 +789,11 @@ impl PasswordHasher for MockPasswordHasherWrapper {
         self.dummy_calls.fetch_add(1, Ordering::SeqCst);
         self.inner.verify_against_dummy_hash(password).await
     }
+
+    async fn compute_dummy_hash(&self, password: &RawPassword) -> Result<(), PortError> {
+        self.dummy_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.compute_dummy_hash(password).await
+    }
 }
 
 #[derive(Default, Debug)]
@@ -916,11 +982,15 @@ async fn test_refresh_session_token_reuse_detection_revokes_entire_family() -> T
 
     // Verify session 1 is now marked is_replaced = true
     let s1 = session_repo.find_by_id(&initial_session.id).await?;
-    let s1 = match s1 {
+    let mut s1 = match s1 {
         Some(s) => s,
         None => return Err("session 1 missing".into()),
     };
     assert!(s1.is_replaced);
+
+    // Simulate replay outside grace window
+    s1.last_active_at = Utc::now() - chrono::Duration::seconds(15);
+    session_repo.update(&s1).await?;
 
     // 3. REPLAY ATTACK: Present token_1 AGAIN!
     let replay_cmd = RefreshTokenCommand {
@@ -1057,6 +1127,76 @@ async fn test_register_user_flow() -> TestResult {
         Err(AppError::Conflict) => {}
         other => return Err(format!("expected Conflict error, got {other:?}").into()),
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_register_timing_mitigation_on_duplicate_email_and_username() -> TestResult {
+    let user_repo = Arc::new(MockUserRepository::default());
+    let password_hasher = Arc::new(MockPasswordHasherWrapper::new()?);
+    let token_store = Arc::new(MockTokenStore::default());
+    let hibp_client = Arc::new(MockHibpClient::default());
+    let (event_bus, _event_rx) = EventBus::new(100);
+
+    let use_case = RegisterUserUseCase::new(
+        user_repo.clone(),
+        password_hasher.clone(),
+        token_store.clone(),
+        hibp_client.clone(),
+        event_bus,
+        Duration::from_secs(86400),
+    );
+
+    // 1. Initial registration
+    let initial_cmd = RegisterCommand {
+        email: "bob@example.com".to_owned(),
+        password: "ValidPassword123!".to_owned(),
+        username: Some("bob".to_owned()),
+        ip_address: None,
+        user_agent: None,
+        request_id: RequestId::new(),
+    };
+    use_case.execute(initial_cmd).await?;
+    assert_eq!(password_hasher.dummy_calls.load(Ordering::SeqCst), 0);
+
+    // 2. Duplicate email attempt: must return Conflict AND trigger compute_dummy_hash
+    let dup_email_cmd = RegisterCommand {
+        email: "bob@example.com".to_owned(),
+        password: "ValidPassword123!".to_owned(),
+        username: Some("different_user".to_owned()),
+        ip_address: None,
+        user_agent: None,
+        request_id: RequestId::new(),
+    };
+    match use_case.execute(dup_email_cmd).await {
+        Err(AppError::Conflict) => {}
+        other => return Err(format!("expected Conflict, got {other:?}").into()),
+    }
+    assert_eq!(
+        password_hasher.dummy_calls.load(Ordering::SeqCst),
+        1,
+        "Dummy hash must be computed on duplicate email conflict"
+    );
+
+    // 3. Duplicate username attempt: must return Conflict AND trigger compute_dummy_hash
+    let dup_user_cmd = RegisterCommand {
+        email: "bob_unique@example.com".to_owned(),
+        password: "ValidPassword123!".to_owned(),
+        username: Some("bob".to_owned()),
+        ip_address: None,
+        user_agent: None,
+        request_id: RequestId::new(),
+    };
+    match use_case.execute(dup_user_cmd).await {
+        Err(AppError::Conflict) => {}
+        other => return Err(format!("expected Conflict, got {other:?}").into()),
+    }
+    assert_eq!(
+        password_hasher.dummy_calls.load(Ordering::SeqCst),
+        2,
+        "Dummy hash must be computed on duplicate username conflict"
+    );
 
     Ok(())
 }
@@ -1596,39 +1736,145 @@ async fn test_refresh_session_concurrent_cas_race_condition() -> TestResult {
     };
 
     assert!(!success.access_token.is_empty());
-    // The failed one detected reuse and revoked
+    // The losing request must receive ConcurrentRefresh with retry delay
     match failure {
-        AppError::TokenReuseDetected => {}
-        other => return Err(format!("expected TokenReuseDetected, got {other:?}").into()),
+        AppError::ConcurrentRefresh { retry_after_secs } => {
+            assert_eq!(retry_after_secs, 1);
+        }
+        other => return Err(format!("expected ConcurrentRefresh, got {other:?}").into()),
     }
 
-    // Verify session was blacklisted in Redis token store
+    // Verify session was NOT blacklisted in Redis token store during grace period
     assert!(
         token_store
             .get_token(&format!("blacklist:session:{session_id}"))
             .await?
-            .is_some()
+            .is_none(),
+        "Session must not be blacklisted in Redis during concurrent refresh grace period"
     );
 
-    // Verify phantom session was prevented: the newly created session was also revoked by family revocation
+    // Verify winning session is NOT revoked and remains active
     let success_session = session_repo
         .find_by_id(&success.session_id)
         .await?
         .ok_or("new session missing")?;
     assert!(
-        success_session.is_revoked(),
-        "Winning session must be revoked when replay triggers family revocation"
+        !success_session.is_revoked(),
+        "Winning session must NOT be revoked upon concurrent refresh conflict"
     );
-    assert_eq!(
-        success_session.revoke_reason.as_deref(),
-        Some("token_reuse_detected")
+    assert!(
+        success_session.is_valid(chrono::Utc::now()),
+        "Winning session must remain valid"
     );
 
-    // Verify all sessions for this family/user are now revoked
-    let all_sessions = session_repo.list_by_user_id(&user.id, 10, 0).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_refresh_session_within_grace_window_returns_conflict_and_preserves_session()
+-> TestResult {
+    let session_repo = Arc::new(MockSessionRepository::default());
+    let user_repo = Arc::new(MockUserRepository::default());
+    let token_signer = Arc::new(MockTokenSigner);
+    let (event_bus, _event_rx) = EventBus::new(100);
+
+    let email = EmailAddress::parse("grace@example.com")?;
+    let hasher = Argon2PasswordHasher::new(1024, 1, 1)?;
+    let dummy_hash = hasher
+        .hash_password(&RawPassword::new("DummyPassword123!")?)
+        .await?;
+    let mut user = User::new(email, None, dummy_hash);
+    user.status = korgan::domain::entities::AccountStatus::Active;
+    user_repo.create(&user).await?;
+
+    let token_store: Arc<dyn TokenStore> = Arc::new(MockTokenStore::default());
+    let use_case = RefreshSessionUseCase::new(
+        session_repo.clone(),
+        user_repo.clone(),
+        token_signer.clone(),
+        token_store.clone(),
+        event_bus,
+        Duration::from_secs(900),
+        Duration::from_secs(86400),
+        "https://api.iam.dev".to_owned(),
+        "api".to_owned(),
+    );
+
+    // 1. Create initial session
+    let token_1_raw = "grace_token_1";
+    let token_1_hash = token_utils::hash_token(token_1_raw);
+    let initial_session = Session::new(
+        user.id,
+        token_1_hash,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some("Firefox".to_owned()),
+        Some("Laptop".to_owned()),
+        chrono::Duration::days(7),
+    );
+    let s1_id = initial_session.id;
+    session_repo.create(&initial_session).await?;
+
+    // 2. Rotate once: token_1 rotated to token_2
+    let rotate_cmd = RefreshTokenCommand {
+        refresh_token: token_1_raw.to_owned(),
+        ip_address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        user_agent: Some("Firefox".to_owned()),
+        request_id: RequestId::new(),
+    };
+    let token_2 = use_case.execute(rotate_cmd).await?;
+    assert!(!token_2.access_token.is_empty());
+    assert!(!token_2.refresh_token.is_empty());
+
+    // 3. Immediate subsequent request with token_1 (< 10s grace window)
+    let concurrent_cmd = RefreshTokenCommand {
+        refresh_token: token_1_raw.to_owned(),
+        ip_address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        user_agent: Some("Firefox Tab 2".to_owned()),
+        request_id: RequestId::new(),
+    };
+    let conflict_err = use_case.execute(concurrent_cmd).await;
+
+    // Must return ConcurrentRefresh { retry_after_secs: 1 } instead of TokenReuseDetected
+    match conflict_err {
+        Err(AppError::ConcurrentRefresh { retry_after_secs }) => {
+            assert_eq!(retry_after_secs, 1);
+        }
+        other => return Err(format!("expected ConcurrentRefresh, got {other:?}").into()),
+    }
+
+    // 4. Verify child session (s2) is NOT revoked and is valid
+    let s2 = session_repo
+        .find_by_id(&token_2.session_id)
+        .await?
+        .ok_or("session 2 missing")?;
     assert!(
-        all_sessions.iter().all(|s| s.is_revoked()),
-        "No active phantom session may exist in the revoked family!"
+        !s2.is_revoked(),
+        "Active child session must not be revoked during grace period"
+    );
+    assert!(s2.is_valid(Utc::now()), "Child session must remain valid");
+
+    // 5. Verify parent session (s1) was replaced but NOT revoked
+    let s1 = session_repo
+        .find_by_id(&s1_id)
+        .await?
+        .ok_or("session 1 missing")?;
+    assert!(s1.is_replaced, "Parent session must be marked replaced");
+    assert!(!s1.is_revoked(), "Parent session must not be revoked");
+
+    // 6. Verify neither session was blacklisted in Redis
+    assert!(
+        token_store
+            .get_token(&format!("blacklist:session:{s1_id}"))
+            .await?
+            .is_none(),
+        "Parent session must not be blacklisted in Redis during grace period"
+    );
+    assert!(
+        token_store
+            .get_token(&format!("blacklist:session:{}", token_2.session_id))
+            .await?
+            .is_none(),
+        "Child session must not be blacklisted in Redis during grace period"
     );
 
     Ok(())
@@ -3560,6 +3806,143 @@ async fn test_argon2_semaphore_queue_timeout() -> TestResult {
     for h in handles {
         let _ = h.await;
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_profile_update_preserves_suspended_status_and_lockout() -> TestResult {
+    let user_repo = Arc::new(MockUserRepository::default());
+    let hasher = Argon2PasswordHasher::new(1024, 1, 1)?;
+    let raw_pw = RawPassword::new("SecretPass123!")?;
+    let hash = hasher.hash_password(&raw_pw).await?;
+
+    let mut user = User::new(EmailAddress::parse("victim@example.com")?, None, hash);
+    let user_id = user.id;
+    user_repo.create(&user).await?;
+
+    // Simulate concurrent security events: admin ban and brute-force lockout
+    let lockout_time = Utc::now() + chrono::Duration::minutes(15);
+    user.status = korgan::domain::entities::AccountStatus::Suspended;
+    user.locked_until = Some(lockout_time);
+    user.failed_login_attempts = 5;
+    user_repo.update(&user).await?;
+
+    // Execute profile update
+    let update_uc = UpdateProfileUseCase::new(user_repo.clone());
+    let res = update_uc
+        .execute(UpdateProfileCommand {
+            user_id,
+            username: Some("updated_name".to_string()),
+            request_id: RequestId::new(),
+        })
+        .await?;
+
+    // Result reflects updated username
+    assert_eq!(res.username.as_deref(), Some("updated_name"));
+
+    // Verify stored user in repository preserves suspended status and lockout
+    let stored = user_repo
+        .find_by_id(&user_id)
+        .await?
+        .ok_or("user missing")?;
+    assert_eq!(
+        stored.status,
+        korgan::domain::entities::AccountStatus::Suspended
+    );
+    assert_eq!(stored.locked_until, Some(lockout_time));
+    assert_eq!(stored.failed_login_attempts, 5);
+    assert_eq!(
+        stored.username.map(|u| u.into_inner()),
+        Some("updated_name".to_string())
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mfa_enable_atomic_synchronization() -> TestResult {
+    let user_repo = Arc::new(MockUserRepository::default());
+    let totp_service = Arc::new(MockTotpService);
+    let secret_cipher = Arc::new(MockSecretCipher);
+    let token_store = Arc::new(MockTokenStore::default());
+    let password_hasher = Arc::new(MockPasswordHasherWrapper::new()?);
+    let (event_bus, _rx) = EventBus::new(10);
+
+    let raw_pw = RawPassword::new("SecretPass123!")?;
+    let hash = password_hasher.hash_password(&raw_pw).await?;
+    let user = User::new(EmailAddress::parse("mfa_user@example.com")?, None, hash);
+    let user_id = user.id;
+    user_repo.create(&user).await?;
+
+    // 1. Setup TOTP
+    let setup_uc = SetupTotpUseCase::new(
+        user_repo.clone(),
+        totp_service.clone(),
+        token_store.clone(),
+        "Korgan".to_owned(),
+        Duration::from_secs(900),
+    );
+    let setup_res = setup_uc
+        .execute(SetupTotpCommand {
+            user_id,
+            request_id: RequestId::new(),
+        })
+        .await?;
+    assert!(!setup_res.secret.is_empty());
+
+    // 2. Enable TOTP using valid code "123456"
+    let enable_uc = EnableTotpUseCase::new(
+        user_repo.clone(),
+        totp_service.clone(),
+        secret_cipher.clone(),
+        token_store.clone(),
+        event_bus.clone(),
+    );
+    let enable_res = enable_uc
+        .execute(EnableTotpCommand {
+            user_id,
+            code: "123456".to_owned(),
+            ip_address: None,
+            user_agent: None,
+            request_id: RequestId::new(),
+        })
+        .await?;
+    assert_eq!(enable_res.backup_codes.len(), 10);
+
+    // Verify both user.mfa_enabled AND user_mfa are atomically synchronized
+    let stored_user = user_repo
+        .find_by_id(&user_id)
+        .await?
+        .ok_or("user missing")?;
+    assert!(stored_user.mfa_enabled);
+    let stored_mfa = user_repo.find_mfa(&user_id).await?.ok_or("mfa missing")?;
+    assert!(stored_mfa.is_verified());
+    assert_eq!(stored_mfa.backup_code_hashes.len(), 10);
+
+    // 3. Disable TOTP verifies delete_mfa updates mfa_enabled = false without monolithic update
+    let disable_uc = DisableTotpUseCase::new(
+        user_repo.clone(),
+        password_hasher.clone(),
+        event_bus.clone(),
+    );
+    disable_uc
+        .execute(DisableTotpCommand {
+            user_id,
+            current_password: "SecretPass123!".to_owned(),
+            ip_address: None,
+            user_agent: None,
+            request_id: RequestId::new(),
+        })
+        .await?;
+
+    let post_disable_user = user_repo
+        .find_by_id(&user_id)
+        .await?
+        .ok_or("user missing")?;
+    assert!(!post_disable_user.mfa_enabled);
+    let post_disable_mfa = user_repo.find_mfa(&user_id).await?;
+    assert!(post_disable_mfa.is_none());
 
     Ok(())
 }

@@ -142,6 +142,41 @@ impl UserRepository for TestUserRepo {
         Ok(())
     }
 
+    async fn update_username(
+        &self,
+        user_id: &UserId,
+        new_username: Option<&Username>,
+    ) -> Result<(), PortError> {
+        let mut users = self
+            .users
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        let mut usernames = self
+            .usernames
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        let user = users
+            .get_mut(user_id)
+            .ok_or_else(|| PortError::not_found("user"))?;
+
+        if let Some(ref old_uname) = user.username {
+            usernames.remove(old_uname.as_str());
+        }
+        if let Some(new_uname) = new_username {
+            if let Some(existing_id) = usernames.get(new_uname.as_str())
+                && existing_id != user_id
+            {
+                return Err(PortError::conflict("username taken"));
+            }
+            usernames.insert(new_uname.to_string(), *user_id);
+            user.username = Some(new_uname.clone());
+        } else {
+            user.username = None;
+        }
+        user.updated_at = Utc::now();
+        Ok(())
+    }
+
     async fn update_password(
         &self,
         user_id: &UserId,
@@ -201,12 +236,38 @@ impl UserRepository for TestUserRepo {
         Ok(())
     }
 
+    async fn enable_mfa(&self, mfa: &UserMfa) -> Result<(), PortError> {
+        let mut mfa_map = self
+            .mfa
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        let mut users = self
+            .users
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        let user = users
+            .get_mut(&mfa.user_id)
+            .ok_or_else(|| PortError::not_found("user"))?;
+        user.mfa_enabled = true;
+        user.updated_at = Utc::now();
+        mfa_map.insert(mfa.user_id, mfa.clone());
+        Ok(())
+    }
+
     async fn delete_mfa(&self, user_id: &UserId) -> Result<(), PortError> {
         let mut store = self
             .mfa
             .lock()
             .map_err(|e| PortError::database(e.to_string()))?;
         store.remove(user_id);
+        let mut users = self
+            .users
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        if let Some(user) = users.get_mut(user_id) {
+            user.mfa_enabled = false;
+            user.updated_at = Utc::now();
+        }
         Ok(())
     }
 
@@ -1187,7 +1248,7 @@ async fn test_mfa_workflow_and_profile_updates() -> TestResult {
     let claims = korgan::ports::services::AccessTokenClaims {
         sub: user.id,
         sid: session_id,
-        iss: "https://auth.korgan.local".to_owned(),
+        iss: "http://localhost:8080".to_owned(),
         aud: "korgan".to_owned(),
         exp: Utc::now().timestamp() + 3600,
         iat: Utc::now().timestamp(),
@@ -1976,5 +2037,107 @@ async fn test_rate_limit_fail_closed_on_redis_error() -> TestResult {
     let problem: ProblemDetails = serde_json::from_slice(&bytes)?;
     assert_eq!(problem.status, 503);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_auth_extractor_rejects_mismatched_issuer_claim()
+-> Result<(), Box<dyn std::error::Error>> {
+    use korgan::ports::services::TokenSigner;
+
+    let ctx = setup_test_app()?;
+    let dummy_hash =
+        PasswordHash::new("$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgqlndPqnRMg")?;
+    let mut user = User::new(
+        EmailAddress::parse("iss_test@example.com")?,
+        Some(Username::new("iss_test")?),
+        dummy_hash,
+    );
+    user.status = korgan::domain::entities::AccountStatus::Active;
+    ctx.user_repo.create(&user).await?;
+
+    let session = Session::new(
+        user.id,
+        "token_hash_iss_test".to_string(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some("Mozilla/5.0".to_string()),
+        None,
+        chrono::Duration::days(1),
+    );
+    ctx.session_repo.create(&session).await?;
+
+    // Token signed with mismatched issuer
+    let claims = korgan::ports::services::AccessTokenClaims {
+        sub: user.id,
+        sid: session.id,
+        iss: "https://rogue-issuer.evil.com".to_owned(),
+        aud: "korgan".to_owned(),
+        exp: Utc::now().timestamp() + 300,
+        iat: Utc::now().timestamp(),
+        jti: uuid::Uuid::now_v7().to_string(),
+        auth_time: session.created_at.timestamp(),
+        amr: vec!["pwd".to_owned()],
+    };
+    let token = ctx.token_signer.sign_access_token(&claims)?;
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/users/me")
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())?;
+
+    let res = send_request(&ctx.app, req).await?;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_auth_extractor_rejects_mismatched_audience_claim()
+-> Result<(), Box<dyn std::error::Error>> {
+    use korgan::ports::services::TokenSigner;
+
+    let ctx = setup_test_app()?;
+    let dummy_hash =
+        PasswordHash::new("$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgqlndPqnRMg")?;
+    let mut user = User::new(
+        EmailAddress::parse("aud_test@example.com")?,
+        Some(Username::new("aud_test")?),
+        dummy_hash,
+    );
+    user.status = korgan::domain::entities::AccountStatus::Active;
+    ctx.user_repo.create(&user).await?;
+
+    let session = Session::new(
+        user.id,
+        "token_hash_aud_test".to_string(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some("Mozilla/5.0".to_string()),
+        None,
+        chrono::Duration::days(1),
+    );
+    ctx.session_repo.create(&session).await?;
+
+    // Token signed with mismatched audience
+    let claims = korgan::ports::services::AccessTokenClaims {
+        sub: user.id,
+        sid: session.id,
+        iss: "http://localhost:8080".to_owned(),
+        aud: "other-microservice".to_owned(),
+        exp: Utc::now().timestamp() + 300,
+        iat: Utc::now().timestamp(),
+        jti: uuid::Uuid::now_v7().to_string(),
+        auth_time: session.created_at.timestamp(),
+        amr: vec!["pwd".to_owned()],
+    };
+    let token = ctx.token_signer.sign_access_token(&claims)?;
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/users/me")
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())?;
+
+    let res = send_request(&ctx.app, req).await?;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     Ok(())
 }

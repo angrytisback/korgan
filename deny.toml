@@ -5,7 +5,11 @@ targets = []
 version = 2
 unmaintained = "all"
 yanked = "deny"
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0459 / CVE-2026-119375: SQLite WAL information disclosure in libsqlite3-sys < 0.39.0.
+    # Korgan uses PostgreSQL & Redis only; SQLite runtime is not reachable.
+    "RUSTSEC-2026-0459",
+]
 
 [licenses]
 version = 2

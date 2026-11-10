@@ -553,6 +553,8 @@ impl AuditLogRepository for OAuthTestAuditRepo {
 #[derive(Default, Debug)]
 struct OAuthTestAccountRepo {
     accounts: Mutex<HashMap<OAuthAccountId, OAuthAccount>>,
+    user_repo: Mutex<Option<Arc<OAuthTestUserRepo>>>,
+    fail_link: Mutex<bool>,
 }
 
 #[async_trait]
@@ -591,6 +593,33 @@ impl OAuthAccountRepository for OAuthTestAccountRepo {
             .map_err(|e| PortError::database(e.to_string()))?;
         accounts.insert(account.id, account.clone());
         Ok(())
+    }
+
+    async fn link_oauth_account(
+        &self,
+        user: Option<&User>,
+        account: &OAuthAccount,
+    ) -> Result<(), PortError> {
+        let should_fail = *self
+            .fail_link
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        if should_fail {
+            return Err(PortError::conflict("simulated account link collision"));
+        }
+
+        if let Some(user) = user {
+            let user_repo = self
+                .user_repo
+                .lock()
+                .map_err(|e| PortError::database(e.to_string()))?
+                .clone();
+            if let Some(repo) = user_repo {
+                repo.create(user).await?;
+            }
+        }
+
+        self.create(account).await
     }
 }
 
@@ -919,6 +948,9 @@ async fn setup_app() -> TestResult<TestContext> {
     let session_repo = Arc::new(OAuthTestSessionRepo::default());
     let audit_repo = Arc::new(OAuthTestAuditRepo::default());
     let oauth_repo = Arc::new(OAuthTestAccountRepo::default());
+    if let Ok(mut guard) = oauth_repo.user_repo.lock() {
+        *guard = Some(user_repo.clone());
+    }
     let passkey_repo: Arc<dyn PasskeyRepository> = Arc::new(OAuthPasskeyRepo::default());
     let token_store = Arc::new(OAuthTestTokenStore::default());
     let rate_limiter = Arc::new(OAuthTestRateLimiter);
@@ -1103,6 +1135,7 @@ async fn test_oauth_new_user_signup_and_cookie_issuance() -> TestResult {
             "/api/v1/auth/oauth/google/callback?code={}&state={}",
             auth_code, url_resp.state
         ))
+        .header("Cookie", format!("__Host-oauth_state={}", url_resp.state))
         .header("X-Client-Type", "web")
         .body(Body::empty())?;
 
@@ -1201,6 +1234,7 @@ async fn test_oauth_existing_user_linking() -> TestResult {
             "/api/v1/auth/oauth/github/callback?code={}&state={}",
             auth_code, url_resp.state
         ))
+        .header("Cookie", format!("__Host-oauth_state={}", url_resp.state))
         .body(Body::empty())?;
 
     let res = send_request(&ctx.app, req).await?;
@@ -1269,6 +1303,7 @@ async fn test_oauth_existing_user_linking() -> TestResult {
             "/api/v1/auth/oauth/github/callback?code={}&state={}",
             auth_code2, url_resp2.state
         ))
+        .header("Cookie", format!("__Host-oauth_state={}", url_resp2.state))
         .body(Body::empty())?;
     let res_login = send_request(&ctx.app, req_login).await?;
     assert_eq!(res_login.status(), StatusCode::OK);
@@ -1311,24 +1346,75 @@ async fn test_oauth_anti_csrf_state_validation_failure() -> TestResult {
         },
     )?;
 
-    // First attempt succeeds
-    let req_first = Request::builder()
+    // Attack test: State is valid in Redis, but browser does not send the matching cookie (Login CSRF attempt)
+    let req_no_cookie = Request::builder()
         .method(Method::GET)
         .uri(format!(
             "/api/v1/auth/oauth/google/callback?code={}&state={}",
             auth_code, url_resp.state
         ))
         .body(Body::empty())?;
-    let res_first = send_request(&ctx.app, req_first).await?;
-    assert_eq!(res_first.status(), StatusCode::OK);
+    let res_no_cookie = send_request(&ctx.app, req_no_cookie).await?;
+    assert_eq!(res_no_cookie.status(), StatusCode::FORBIDDEN);
 
-    // Second attempt with exact same state fails with 403 Forbidden
-    let req_second = Request::builder()
+    // State is burned unconditionally on the cookie mismatch above.
+    // Secondary attempt with the exact same state (even with valid cookie) MUST fail with 403 Forbidden!
+    let req_burned = Request::builder()
         .method(Method::GET)
         .uri(format!(
             "/api/v1/auth/oauth/google/callback?code={}&state={}",
             auth_code, url_resp.state
         ))
+        .header("Cookie", format!("__Host-oauth_state={}", url_resp.state))
+        .body(Body::empty())?;
+    let res_burned = send_request(&ctx.app, req_burned).await?;
+    assert_eq!(res_burned.status(), StatusCode::FORBIDDEN);
+
+    // Now issue a fresh state to verify that a legitimate flow with valid cookie succeeds
+    let req_url_valid = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/auth/oauth/google/url")
+        .body(Body::empty())?;
+    let res_url_valid = send_request(&ctx.app, req_url_valid).await?;
+    let url_resp_valid: OAuthUrlResponse = json_body(res_url_valid).await?;
+
+    let auth_code_valid = "replay_code_valid";
+    ctx.google_provider.register_profile(
+        auth_code_valid,
+        OAuthProfile {
+            provider: OAuthProvider::Google,
+            provider_user_id: "replay-sub-valid".to_owned(),
+            email: EmailAddress::parse("replay_valid@example.com")?,
+            name: None,
+        },
+    )?;
+
+    // First attempt with fresh valid state and valid cookie succeeds
+    let req_first = Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "/api/v1/auth/oauth/google/callback?code={}&state={}",
+            auth_code_valid, url_resp_valid.state
+        ))
+        .header(
+            "Cookie",
+            format!("__Host-oauth_state={}", url_resp_valid.state),
+        )
+        .body(Body::empty())?;
+    let res_first = send_request(&ctx.app, req_first).await?;
+    assert_eq!(res_first.status(), StatusCode::OK);
+
+    // Second attempt with exact same state fails with 403 Forbidden (burned on use)
+    let req_second = Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "/api/v1/auth/oauth/google/callback?code={}&state={}",
+            auth_code_valid, url_resp_valid.state
+        ))
+        .header(
+            "Cookie",
+            format!("__Host-oauth_state={}", url_resp_valid.state),
+        )
         .body(Body::empty())?;
     let res_second = send_request(&ctx.app, req_second).await?;
     assert_eq!(res_second.status(), StatusCode::FORBIDDEN);
@@ -1369,6 +1455,7 @@ async fn test_oauth_password_login_denial_on_passwordless_account() -> TestResul
             "/api/v1/auth/oauth/google/callback?code={}&state={}",
             auth_code, url_resp.state
         ))
+        .header("Cookie", format!("__Host-oauth_state={}", url_resp.state))
         .body(Body::empty())?;
     let res_callback = send_request(&ctx.app, req_callback).await?;
     assert_eq!(res_callback.status(), StatusCode::OK);
@@ -1460,6 +1547,7 @@ async fn test_oauth_pre_account_takeover_prevention() -> TestResult {
             "/api/v1/auth/oauth/google/callback?code={}&state={}",
             auth_code, url_resp.state
         ))
+        .header("Cookie", format!("__Host-oauth_state={}", url_resp.state))
         .body(Body::empty())?;
     let res_callback = send_request(&ctx.app, req_callback).await?;
     assert_eq!(res_callback.status(), StatusCode::OK);
@@ -1530,6 +1618,7 @@ async fn test_oauth_pre_account_takeover_prevention() -> TestResult {
             "/api/v1/auth/oauth/google/callback?code={}&state={}",
             auth_code2, url_resp2.state
         ))
+        .header("Cookie", format!("__Host-oauth_state={}", url_resp2.state))
         .body(Body::empty())?;
     let res_callback2 = send_request(&ctx.app, req_callback2).await?;
     assert_eq!(res_callback2.status(), StatusCode::OK);
@@ -1645,6 +1734,7 @@ async fn test_oauth_google_rejects_unverified_email() -> TestResult {
             "/api/v1/auth/oauth/google/callback?code={}&state={}",
             bad_code, url_resp.state
         ))
+        .header("Cookie", format!("__Host-oauth_state={}", url_resp.state))
         .body(Body::empty())?;
 
     let res_callback = send_request(&ctx.app, req_callback).await?;
@@ -1792,6 +1882,7 @@ async fn test_oauth_github_ignores_public_bio_email() -> TestResult {
             "/api/v1/auth/oauth/github/callback?code={}&state={}",
             auth_code, url_resp.state
         ))
+        .header("Cookie", format!("__Host-oauth_state={}", url_resp.state))
         .body(Body::empty())?;
 
     let res_callback = send_request(&ctx.app, req_callback).await?;
@@ -1810,6 +1901,241 @@ async fn test_oauth_github_ignores_public_bio_email() -> TestResult {
     assert!(
         bio_user.is_none(),
         "unverified bio email must not exist in user repository"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_oauth_state_consumed_unconditionally_on_cookie_mismatch() -> TestResult {
+    let ctx = setup_app().await?;
+
+    // 1. Generate authorization URL and anti-CSRF state token
+    let req_url = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/auth/oauth/google/url")
+        .body(Body::empty())?;
+    let res_url = send_request(&ctx.app, req_url).await?;
+    assert_eq!(res_url.status(), StatusCode::OK);
+    let url_resp: OAuthUrlResponse = json_body(res_url).await?;
+
+    let state_key = format!("oauth:state:google:{}", url_resp.state);
+    assert_eq!(
+        ctx.token_store.get_token(&state_key).await?.as_deref(),
+        Some("valid")
+    );
+
+    let auth_code = "burn_test_code_1";
+    ctx.google_provider.register_profile(
+        auth_code,
+        OAuthProfile {
+            provider: OAuthProvider::Google,
+            provider_user_id: "burn-sub-1".to_owned(),
+            email: EmailAddress::parse("burn@example.com")?,
+            name: None,
+        },
+    )?;
+
+    // 2. Invoke callback with valid state parameter but mismatched cookie (CSRF attack)
+    let req_mismatch = Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "/api/v1/auth/oauth/google/callback?code={}&state={}",
+            auth_code, url_resp.state
+        ))
+        .header("Cookie", "__Host-oauth_state=attacker_controlled_state")
+        .body(Body::empty())?;
+    let res_mismatch = send_request(&ctx.app, req_mismatch).await?;
+    assert_eq!(res_mismatch.status(), StatusCode::FORBIDDEN);
+
+    // 3. State in token store MUST be consumed (burned) despite cookie mismatch!
+    assert_eq!(
+        ctx.token_store.get_token(&state_key).await?,
+        None,
+        "OAuth state token was not consumed on cookie mismatch"
+    );
+
+    // 4. Replay attempt presenting the matching cookie must fail because state is already burned
+    let req_replay = Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "/api/v1/auth/oauth/google/callback?code={}&state={}",
+            auth_code, url_resp.state
+        ))
+        .header("Cookie", format!("__Host-oauth_state={}", url_resp.state))
+        .body(Body::empty())?;
+    let res_replay = send_request(&ctx.app, req_replay).await?;
+    assert_eq!(res_replay.status(), StatusCode::FORBIDDEN);
+
+    let problem: ProblemDetails = json_body(res_replay).await?;
+    assert_eq!(problem.code, "AUTH_FORBIDDEN");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_oauth_state_cookie_cleared_on_all_error_pathways() -> TestResult {
+    let ctx = setup_app().await?;
+
+    // Pathway 1: Early return on invalid provider (/unknown_provider/callback)
+    let req_invalid_provider = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/auth/oauth/unknown_provider/callback?code=foo&state=bar")
+        .header("Cookie", "__Host-oauth_state=bar")
+        .body(Body::empty())?;
+    let res_invalid_provider = send_request(&ctx.app, req_invalid_provider).await?;
+    assert_eq!(
+        res_invalid_provider.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    let cookies_invalid_provider: Vec<_> = res_invalid_provider
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        cookies_invalid_provider
+            .iter()
+            .any(|c| c.contains("__Host-oauth_state=") && c.contains("Max-Age=0")),
+        "__Host-oauth_state cookie was not cleared on invalid provider error"
+    );
+    assert!(
+        cookies_invalid_provider
+            .iter()
+            .any(|c| c.contains("oauth_state=") && c.contains("Max-Age=0")),
+        "fallback oauth_state cookie was not cleared on invalid provider error"
+    );
+
+    // Pathway 2: Use case error (invalid / expired state -> 403 Forbidden)
+    let req_invalid_state = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/auth/oauth/google/callback?code=foo&state=invalid_state_123")
+        .header("Cookie", "__Host-oauth_state=invalid_state_123")
+        .body(Body::empty())?;
+    let res_invalid_state = send_request(&ctx.app, req_invalid_state).await?;
+    assert_eq!(res_invalid_state.status(), StatusCode::FORBIDDEN);
+
+    let cookies_invalid_state: Vec<_> = res_invalid_state
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        cookies_invalid_state
+            .iter()
+            .any(|c| c.contains("__Host-oauth_state=") && c.contains("Max-Age=0")),
+        "__Host-oauth_state cookie was not cleared on state mismatch error"
+    );
+
+    // Pathway 3: Success path clears cookie too
+    let req_url = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/auth/oauth/google/url")
+        .body(Body::empty())?;
+    let res_url = send_request(&ctx.app, req_url).await?;
+    let url_resp: OAuthUrlResponse = json_body(res_url).await?;
+
+    let auth_code = "clear_cookie_success_code";
+    ctx.google_provider.register_profile(
+        auth_code,
+        OAuthProfile {
+            provider: OAuthProvider::Google,
+            provider_user_id: "clear-cookie-sub-1".to_owned(),
+            email: EmailAddress::parse("clear_cookie@example.com")?,
+            name: None,
+        },
+    )?;
+
+    let req_success = Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "/api/v1/auth/oauth/google/callback?code={}&state={}",
+            auth_code, url_resp.state
+        ))
+        .header("Cookie", format!("__Host-oauth_state={}", url_resp.state))
+        .body(Body::empty())?;
+    let res_success = send_request(&ctx.app, req_success).await?;
+    assert_eq!(res_success.status(), StatusCode::OK);
+
+    let cookies_success: Vec<_> = res_success
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        cookies_success
+            .iter()
+            .any(|c| c.contains("__Host-oauth_state=") && c.contains("Max-Age=0")),
+        "__Host-oauth_state cookie was not cleared on success response"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_oauth_atomic_rollback_on_failed_account_linking() -> TestResult {
+    let ctx = setup_app().await?;
+
+    // Configure the OAuth account repo to simulate a database failure / collision during linking
+    *ctx.oauth_repo
+        .fail_link
+        .lock()
+        .map_err(|e| format!("mutex lock error: {e}"))? = true;
+
+    // Generate CSRF state
+    let req_url = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/auth/oauth/google/url")
+        .body(Body::empty())?;
+    let res_url = send_request(&ctx.app, req_url).await?;
+    let url_resp: OAuthUrlResponse = json_body(res_url).await?;
+
+    // Mock profile for a new user
+    let auth_code = "atomic_rollback_code_1";
+    let target_email = EmailAddress::parse("orphaned_check@example.com")?;
+    ctx.google_provider.register_profile(
+        auth_code,
+        OAuthProfile {
+            provider: OAuthProvider::Google,
+            provider_user_id: "atomic-sub-fail".to_owned(),
+            email: target_email.clone(),
+            name: Some("Orphan Check".to_owned()),
+        },
+    )?;
+
+    // Send callback
+    let req_callback = Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "/api/v1/auth/oauth/google/callback?code={}&state={}",
+            auth_code, url_resp.state
+        ))
+        .header("Cookie", format!("__Host-oauth_state={}", url_resp.state))
+        .body(Body::empty())?;
+    let res_callback = send_request(&ctx.app, req_callback).await?;
+
+    // Account link failed: should return error status (Conflict / 409 or 403/500)
+    assert!(res_callback.status().is_client_error() || res_callback.status().is_server_error());
+
+    // CRITICAL ATOMICITY CHECK: User record must NOT exist in UserRepository
+    let user_in_db = ctx.user_repo.find_by_email(&target_email).await?;
+    assert!(
+        user_in_db.is_none(),
+        "User record was created despite failed account linking (orphaned user violation!)"
+    );
+
+    // CRITICAL ATOMICITY CHECK: OAuth link must NOT exist in OAuthAccountRepository
+    let account_in_db = ctx
+        .oauth_repo
+        .find_by_provider_and_id(OAuthProvider::Google, "atomic-sub-fail")
+        .await?;
+    assert!(
+        account_in_db.is_none(),
+        "OAuth account was created despite failed linking transaction"
     );
 
     Ok(())

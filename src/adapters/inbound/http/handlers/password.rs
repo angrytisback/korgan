@@ -158,6 +158,7 @@ pub async fn change(
 ) -> Result<Json<MessageResponse>, ApiError> {
     let cmd = ChangePasswordCommand {
         user_id: auth_user.user_id,
+        current_session_id: Some(auth_user.session_id),
         current_password: body.current_password,
         new_password: body.new_password,
         ip_address: Some(metadata.ip),

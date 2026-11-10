@@ -5,6 +5,7 @@ pub mod aes;
 pub mod argon2;
 pub mod jwt;
 pub mod passkey;
+pub mod password;
 pub mod totp;
 
 pub use crate::ports::services::DecryptedSecret;
