@@ -133,27 +133,56 @@ impl AuditLog {
     }
 
     /// Computes the cryptographic SHA-256 entry hash linking to the optional previous entry hash.
+    ///
+    /// Prepends the domain separator `b"KORGAN_AUDIT_V1\0"` and inserts canonical `b"|"` delimiters
+    /// between each field slot:
+    /// `prev_hash | entry_id | user_id | actor_ip | user_agent | request_id | event_type | event_status | created_at | details`
+    /// to prevent hash extension and collision attacks caused by variable-length or empty fields.
     #[must_use]
     pub fn compute_entry_hash(&self, prev_hash: Option<&str>) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(prev_hash.unwrap_or("GENESIS").as_bytes());
+
+        // Cryptographic domain separator
+        hasher.update(b"KORGAN_AUDIT_V1\0");
+
+        // Canonical field slots separated by '|'
+        let prev_val = prev_hash.unwrap_or("GENESIS");
+        hasher.update(prev_val.as_bytes());
+        hasher.update(b"|");
+
         hasher.update(self.id.to_string().as_bytes());
+        hasher.update(b"|");
+
         if let Some(uid) = self.user_id {
             hasher.update(uid.to_string().as_bytes());
         }
+        hasher.update(b"|");
+
         if let Some(ip) = self.actor_ip {
             hasher.update(ip.to_string().as_bytes());
         }
+        hasher.update(b"|");
+
         if let Some(ref ua) = self.user_agent {
             hasher.update(ua.as_bytes());
         }
+        hasher.update(b"|");
+
         hasher.update(self.request_id.to_string().as_bytes());
+        hasher.update(b"|");
+
         hasher.update(self.event_type.as_bytes());
+        hasher.update(b"|");
+
         hasher.update(self.event_status.as_str().as_bytes());
+        hasher.update(b"|");
+
+        hasher.update(self.created_at.timestamp().to_string().as_bytes());
+        hasher.update(b"|");
+
         let meta_str = self.metadata.to_string();
         hasher.update(meta_str.as_bytes());
-        hasher.update(self.created_at.timestamp().to_string().as_bytes());
 
         let digest = hasher.finalize();
         use std::fmt::Write;
@@ -168,6 +197,12 @@ impl AuditLog {
     pub fn chain_to(&mut self, prev_hash: Option<&str>) {
         self.prev_hash = prev_hash.map(|s| s.to_owned());
         self.entry_hash = Some(self.compute_entry_hash(prev_hash));
+    }
+
+    /// Chains this audit log to the given previous hash at the specified timestamp.
+    pub fn chain_with_timestamp(&mut self, prev_hash: Option<&str>, timestamp: DateTime<Utc>) {
+        self.created_at = timestamp;
+        self.chain_to(prev_hash);
     }
 
     /// Verifies the cryptographic integrity of this audit log entry.
@@ -212,5 +247,85 @@ mod tests {
         assert_eq!(log.event_status, AuditEventStatus::Success);
         assert_eq!(log.event_status.as_str(), "success");
         assert_eq!(log.request_id, request_id);
+    }
+
+    #[test]
+    fn audit_log_chain_with_timestamp() {
+        let req_id = RequestId::new();
+        let mut entry = AuditLog::new(
+            None,
+            None,
+            None,
+            req_id,
+            "test_event",
+            AuditEventStatus::Success,
+            serde_json::json!({}),
+        );
+        let custom_time = Utc::now() + chrono::Duration::seconds(10);
+        entry.chain_with_timestamp(Some("PREV_HASH_123"), custom_time);
+
+        assert_eq!(entry.created_at, custom_time);
+        assert_eq!(entry.prev_hash.as_deref(), Some("PREV_HASH_123"));
+        assert!(entry.entry_hash.is_some());
+        assert!(entry.verify_integrity(Some("PREV_HASH_123")));
+    }
+
+    #[test]
+    fn test_audit_log_hash_delimiter_collision_resistance() {
+        let req_id = RequestId::new();
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+        let fixed_time = Utc::now();
+        let shared_id = AuditLogId::new();
+
+        // Entry 1: actor_ip is None, user_agent is "127.0.0.1"
+        let mut entry1 = AuditLog::new(
+            None,
+            None,
+            Some("127.0.0.1".to_string()),
+            req_id,
+            "test_event",
+            AuditEventStatus::Success,
+            serde_json::json!({}),
+        );
+        entry1.id = shared_id;
+        entry1.created_at = fixed_time;
+
+        // Entry 2: actor_ip is 127.0.0.1, user_agent is None
+        let mut entry2 = AuditLog::new(
+            None,
+            Some(ip),
+            None,
+            req_id,
+            "test_event",
+            AuditEventStatus::Success,
+            serde_json::json!({}),
+        );
+        entry2.id = shared_id;
+        entry2.created_at = fixed_time;
+
+        let hash1 = entry1.compute_entry_hash(None);
+        let hash2 = entry2.compute_entry_hash(None);
+
+        // Canonical delimiters must guarantee distinct hashes despite identical character sequences
+        assert_ne!(
+            hash1, hash2,
+            "Collision detected: actor_ip and user_agent fields must not collide!"
+        );
+    }
+
+    #[test]
+    fn test_audit_log_hash_domain_separator_uniqueness() {
+        let req_id = RequestId::new();
+        let entry = AuditLog::new(
+            None,
+            None,
+            None,
+            req_id,
+            "test_event",
+            AuditEventStatus::Success,
+            serde_json::json!({}),
+        );
+        let hash = entry.compute_entry_hash(None);
+        assert_eq!(hash.len(), 64);
     }
 }

@@ -11,7 +11,7 @@ use crate::application::error::AppError;
 use crate::application::use_cases::token_utils::{generate_opaque_token, hash_token};
 use crate::application::workers::{AppEvent, EventBus};
 use crate::domain::entities::audit_events;
-use crate::domain::entities::{AuditEventStatus, AuditLog};
+use crate::domain::entities::{AuditEventStatus, AuditLog, Session};
 use crate::ports::cache::TokenStore;
 use crate::ports::repositories::{SessionRepository, UserRepository};
 use crate::ports::services::{AccessTokenClaims, TokenSigner};
@@ -26,6 +26,7 @@ pub struct RefreshSessionUseCase {
     event_bus: EventBus,
     access_token_ttl: Duration,
     refresh_token_ttl: Duration,
+    rotation_grace_period: chrono::Duration,
     jwt_issuer: String,
     jwt_audience: String,
 }
@@ -35,6 +36,7 @@ impl std::fmt::Debug for RefreshSessionUseCase {
         f.debug_struct("RefreshSessionUseCase")
             .field("access_token_ttl", &self.access_token_ttl)
             .field("refresh_token_ttl", &self.refresh_token_ttl)
+            .field("rotation_grace_period", &self.rotation_grace_period)
             .finish()
     }
 }
@@ -62,9 +64,72 @@ impl RefreshSessionUseCase {
             event_bus,
             access_token_ttl,
             refresh_token_ttl,
+            rotation_grace_period: chrono::Duration::seconds(10),
             jwt_issuer,
             jwt_audience,
         }
+    }
+
+    /// Overrides the default rotation grace period (10 seconds).
+    #[must_use]
+    pub fn with_rotation_grace_period(mut self, period: chrono::Duration) -> Self {
+        self.rotation_grace_period = period;
+        self
+    }
+
+    async fn handle_token_replay(
+        &self,
+        session: &Session,
+        cmd: &RefreshTokenCommand,
+    ) -> Result<AuthTokensResult, AppError> {
+        let revoked_ids = self
+            .session_repo
+            .revoke_family(&session.token_family_id, "token_reuse_detected")
+            .await?;
+
+        let token_store = self.token_store.clone();
+        let refresh_ttl = self.refresh_token_ttl;
+        let mut entries: Vec<(String, &'static str, std::time::Duration)> =
+            Vec::with_capacity(revoked_ids.len() + 1);
+        entries.push((
+            format!("blacklist:session:{}", session.id),
+            "revoked",
+            refresh_ttl,
+        ));
+        for sid in revoked_ids {
+            entries.push((format!("blacklist:session:{sid}"), "revoked", refresh_ttl));
+        }
+
+        crate::application::use_cases::shielded(move || {
+            let token_store = token_store.clone();
+            let entries = entries.clone();
+            async move {
+                let borrowed: Vec<(&str, &str, std::time::Duration)> = entries
+                    .iter()
+                    .map(|(k, v, ttl)| (k.as_str(), *v, *ttl))
+                    .collect();
+                token_store.set_tokens_batch(&borrowed).await?;
+                Ok(())
+            }
+        })
+        .await?;
+
+        self.event_bus
+            .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+                Some(session.user_id),
+                Some(cmd.ip_address),
+                cmd.user_agent.clone(),
+                cmd.request_id,
+                audit_events::TOKEN_REUSE_DETECTED,
+                AuditEventStatus::Blocked,
+                serde_json::json!({
+                    "session_id": session.id.to_string(),
+                    "token_family_id": session.token_family_id.to_string(),
+                }),
+            ))));
+
+        metrics::counter!("korgan_token_reuse_events_total").increment(1);
+        Err(AppError::TokenReuseDetected)
     }
 
     /// Executes token rotation, checking for replay attacks.
@@ -96,55 +161,10 @@ impl RefreshSessionUseCase {
         }
 
         if existing.is_replaced {
-            // REPLAY DETECTION: Previously rotated token presented again! Revoke the whole family!
-            let revoked_ids = self
-                .session_repo
-                .revoke_family(&existing.token_family_id, "token_reuse_detected")
-                .await?;
-
-            let token_store = self.token_store.clone();
-            let refresh_ttl = self.refresh_token_ttl;
-            let mut entries: Vec<(String, &'static str, std::time::Duration)> =
-                Vec::with_capacity(revoked_ids.len() + 1);
-            entries.push((
-                format!("blacklist:session:{}", existing.id),
-                "revoked",
-                refresh_ttl,
-            ));
-            for sid in revoked_ids {
-                entries.push((format!("blacklist:session:{sid}"), "revoked", refresh_ttl));
+            if existing.is_replaced_within_grace(now, self.rotation_grace_period) {
+                return Err(AppError::concurrent_refresh(1));
             }
-
-            crate::application::use_cases::shielded(move || {
-                let token_store = token_store.clone();
-                let entries = entries.clone();
-                async move {
-                    let borrowed: Vec<(&str, &str, std::time::Duration)> = entries
-                        .iter()
-                        .map(|(k, v, ttl)| (k.as_str(), *v, *ttl))
-                        .collect();
-                    token_store.set_tokens_batch(&borrowed).await?;
-                    Ok(())
-                }
-            })
-            .await?;
-
-            self.event_bus
-                .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
-                    Some(existing.user_id),
-                    Some(cmd.ip_address),
-                    cmd.user_agent,
-                    cmd.request_id,
-                    audit_events::TOKEN_REUSE_DETECTED,
-                    AuditEventStatus::Blocked,
-                    serde_json::json!({
-                        "session_id": existing.id.to_string(),
-                        "token_family_id": existing.token_family_id.to_string(),
-                    }),
-                ))));
-
-            metrics::counter!("korgan_token_reuse_events_total").increment(1);
-            return Err(AppError::TokenReuseDetected);
+            return self.handle_token_replay(&existing, &cmd).await;
         }
 
         // 2. Verify account is still eligible to login
@@ -190,61 +210,17 @@ impl RefreshSessionUseCase {
 
             // Concurrent race detected: recheck session to trigger replay protection if replaced
             if let Some(recheck) = self.session_repo.find_by_token_hash(&token_hash).await? {
-                if recheck.is_replaced {
-                    let revoked_ids = self
-                        .session_repo
-                        .revoke_family(&recheck.token_family_id, "token_reuse_detected")
-                        .await?;
-
-                    let token_store = self.token_store.clone();
-                    let refresh_ttl = self.refresh_token_ttl;
-                    let mut entries: Vec<(String, &'static str, std::time::Duration)> =
-                        Vec::with_capacity(revoked_ids.len() + 1);
-                    entries.push((
-                        format!("blacklist:session:{}", recheck.id),
-                        "revoked",
-                        refresh_ttl,
-                    ));
-                    for sid in revoked_ids {
-                        entries.push((format!("blacklist:session:{sid}"), "revoked", refresh_ttl));
-                    }
-
-                    crate::application::use_cases::shielded(move || {
-                        let token_store = token_store.clone();
-                        let entries = entries.clone();
-                        async move {
-                            let borrowed: Vec<(&str, &str, std::time::Duration)> = entries
-                                .iter()
-                                .map(|(k, v, ttl)| (k.as_str(), *v, *ttl))
-                                .collect();
-                            token_store.set_tokens_batch(&borrowed).await?;
-                            Ok(())
-                        }
-                    })
-                    .await?;
-
-                    self.event_bus
-                        .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
-                            Some(recheck.user_id),
-                            Some(cmd.ip_address),
-                            cmd.user_agent,
-                            cmd.request_id,
-                            audit_events::TOKEN_REUSE_DETECTED,
-                            AuditEventStatus::Blocked,
-                            serde_json::json!({
-                                "session_id": recheck.id.to_string(),
-                                "token_family_id": recheck.token_family_id.to_string(),
-                            }),
-                        ))));
-
-                    metrics::counter!("korgan_token_reuse_events_total").increment(1);
-                    return Err(AppError::TokenReuseDetected);
-                }
                 if recheck.is_revoked() {
                     return Err(AppError::TokenInvalid);
                 }
                 if recheck.is_expired(now) {
                     return Err(AppError::TokenExpired);
+                }
+                if recheck.is_replaced {
+                    if recheck.is_replaced_within_grace(now, self.rotation_grace_period) {
+                        return Err(AppError::concurrent_refresh(1));
+                    }
+                    return self.handle_token_replay(&recheck, &cmd).await;
                 }
             }
             return Err(AppError::TokenInvalid);

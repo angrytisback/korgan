@@ -72,13 +72,6 @@ impl Aes256GcmCipher {
     /// # Errors
     ///
     /// Returns [`PortError`] if authenticated encryption fails.
-    /// Encrypts plaintext using a fresh, CSPRNG-generated 96-bit nonce.
-    ///
-    /// Returns the combined ciphertext with tag and the 12-byte nonce.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PortError`] if authenticated encryption fails.
     pub fn encrypt(
         &self,
         plaintext: &[u8],

@@ -804,6 +804,7 @@ struct E2eTestContext {
     app: Router,
     mail_rx: UnboundedReceiver<(EmailAddress, String, String)>,
     token_signer: Arc<dyn TokenSigner>,
+    session_repo: Arc<E2eSessionRepo>,
 }
 
 fn setup_e2e_app() -> Result<E2eTestContext, Box<dyn std::error::Error>> {
@@ -876,7 +877,7 @@ fn setup_e2e_app() -> Result<E2eTestContext, Box<dyn std::error::Error>> {
     let state = AppState::with_ports(
         settings,
         user_repo,
-        session_repo,
+        session_repo.clone(),
         audit_repo,
         oauth_account_repo,
         passkey_repo,
@@ -902,6 +903,7 @@ fn setup_e2e_app() -> Result<E2eTestContext, Box<dyn std::error::Error>> {
         app,
         mail_rx,
         token_signer: token_signer.clone(),
+        session_repo: session_repo.clone(),
     })
 }
 
@@ -1148,9 +1150,44 @@ async fn test_full_user_lifecycle_and_replay_detection() -> TestResult {
         .body(Body::from(serde_json::to_vec(&replay_payload)?))?;
 
     let replay_res = send_request(&ctx.app, replay_req).await?;
-    assert_eq!(replay_res.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(replay_res.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        replay_res
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
     let replay_problem: ProblemDetails = json_body(replay_res).await?;
-    assert_eq!(replay_problem.code, "AUTH_TOKEN_REUSE_DETECTED");
+    assert_eq!(replay_problem.code, "RESOURCE_CONFLICT");
+
+    // Replay outside grace window (> 10s grace period)
+    {
+        let mut sessions = ctx
+            .session_repo
+            .sessions
+            .lock()
+            .map_err(|e| format!("mutex lock error: {e}"))?;
+        for session in sessions.values_mut() {
+            if session.is_replaced {
+                session.last_active_at = Utc::now() - chrono::Duration::seconds(15);
+            }
+        }
+    }
+
+    let replay_outside_grace_req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/auth/refresh")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&replay_payload)?))?;
+
+    let replay_outside_grace_res = send_request(&ctx.app, replay_outside_grace_req).await?;
+    assert_eq!(replay_outside_grace_res.status(), StatusCode::UNAUTHORIZED);
+    let replay_outside_grace_problem: ProblemDetails = json_body(replay_outside_grace_res).await?;
+    assert_eq!(
+        replay_outside_grace_problem.code,
+        "AUTH_TOKEN_REUSE_DETECTED"
+    );
 
     // =======================================================================
     // 11. VERIFY FULL FAMILY REVOCATION

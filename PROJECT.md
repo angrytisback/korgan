@@ -55,9 +55,9 @@ Every requirement from ORIGINAL_REQUEST.md is inventoried and mapped to a milest
 | M1 | Domain & Crypto Foundation | R8 (Password O(1) bound), R2 (Zeroize wrapper, multi-key JWT & JWKS, user_mfa key_id) | None | DONE |
 | M2 | Channel Separation & Redis Batch | R3 (Dual-mode channel separation & 422 ambiguous token), R7 (Redis batch pipeline & retry) | M1 | DONE |
 | M3 | OAuth2 Takeover & Verification | R1 (Google/GitHub email verification, takeover mitigation, test updates) | M1, M2 | DONE |
-| M4 | Passkey Optimistic Lock | R4 (Passkey sign_count atomic optimistic lock SQL & conflict error) | M1 | IN_PROGRESS |
-| M5 | Infrastructure Protection | R5 (Argon2 semaphore timeout/queue limit 503), R6 (IP extraction & fail-closed rate limit) | M1 | PLANNED |
-| M6 | Regression Suite & Gate | 7 Regression Tests (T1-T7), full cargo test (147+), clippy, fmt, check_boundaries | M1, M2, M3, M4, M5 | PLANNED |
+| M4 | Passkey Optimistic Lock | R4 (Passkey sign_count atomic optimistic lock SQL & conflict error) | M1 | DONE |
+| M5 | Infrastructure Protection | R5 (Argon2 semaphore timeout/queue limit 503), R6 (IP extraction & fail-closed rate limit) | M1 | DONE |
+| M6 | Regression Suite & Gate | 7 Regression Tests (T1-T7), full cargo test (147+), clippy, fmt, check_boundaries | M1, M2, M3, M4, M5 | DONE |
 
 ## Interface Contracts
 

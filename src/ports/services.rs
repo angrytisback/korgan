@@ -66,6 +66,13 @@ pub trait PasswordHasher: Send + Sync + 'static {
     /// Executes verification against a pre-computed dummy Argon2id hash to mitigate
     /// timing attacks during login attempts for non-existent accounts.
     async fn verify_against_dummy_hash(&self, password: &RawPassword) -> Result<(), PortError>;
+
+    /// Executes a dummy Argon2id hash computation matching real parameter costs to mitigate
+    /// timing attacks during registration attempts when an account conflict occurs.
+    async fn compute_dummy_hash(&self, password: &RawPassword) -> Result<(), PortError> {
+        let _ = self.hash_password(password).await?;
+        Ok(())
+    }
 }
 
 /// Asymmetric Ed25519 (EdDSA) JWT signer and verifier port.

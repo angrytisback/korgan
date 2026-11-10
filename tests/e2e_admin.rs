@@ -862,7 +862,7 @@ async fn test_rbac_and_admin_backoffice_flow() -> TestResult {
     let normal_claims = AccessTokenClaims {
         sub: normal_user_id,
         sid: normal_session_id,
-        iss: "https://auth.korgan.local".to_string(),
+        iss: "http://localhost:8080".to_string(),
         aud: "korgan".to_string(),
         exp: Utc::now().timestamp() + 3600,
         iat: Utc::now().timestamp(),
@@ -899,7 +899,7 @@ async fn test_rbac_and_admin_backoffice_flow() -> TestResult {
     let admin_claims = AccessTokenClaims {
         sub: admin_user_id,
         sid: admin_session_id,
-        iss: "https://auth.korgan.local".to_string(),
+        iss: "http://localhost:8080".to_string(),
         aud: "korgan".to_string(),
         exp: Utc::now().timestamp() + 3600,
         iat: Utc::now().timestamp(),

@@ -100,6 +100,11 @@ impl ResetPasswordUseCase {
             .await?
             .ok_or(AppError::NotFound)?;
 
+        match user.status {
+            crate::domain::entities::AccountStatus::Active => {}
+            _ => return Err(AppError::Forbidden),
+        }
+
         // Check if matching current password
         if let Some(ref current_hash) = user.password_hash
             && self

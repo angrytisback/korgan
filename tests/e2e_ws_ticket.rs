@@ -833,7 +833,7 @@ async fn test_ws_ticket_issuance_and_single_use_verification_lifecycle() -> Test
     let claims = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "https://auth.korgan.local".to_string(),
+        iss: "http://localhost:8080".to_string(),
         aud: "korgan".to_string(),
         exp: Utc::now().timestamp() + 3600,
         iat: Utc::now().timestamp(),
@@ -1131,7 +1131,7 @@ async fn test_superadmin_role_can_access_admin_api_endpoints() -> TestResult {
     let claims = AccessTokenClaims {
         sub: superadmin_id,
         sid: session_id,
-        iss: "https://auth.korgan.local".to_string(),
+        iss: "http://localhost:8080".to_string(),
         aud: "korgan".to_string(),
         exp: Utc::now().timestamp() + 3600,
         iat: Utc::now().timestamp(),

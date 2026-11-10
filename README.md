@@ -41,6 +41,9 @@ Korgan is a high-performance, self-hosted Identity and Access Management (IAM) e
 - **Argon2id with Semaphore Protection:** Password hashing is concurrency-bounded to prevent CPU exhaustion attacks.
 - **Encrypted TOTP Secrets:** Stored with AES-256-GCM.
 - **OS-Level Memory Hardening:** Core dump prevention to keep secrets out of crash artifacts.
+- **Strict Verification Gating:** Unverified and non-active accounts are strictly denied authentication tokens and gated from all protected resources.
+- **Browser-Bound OAuth Anti-CSRF:** OAuth state is cryptographically bound to an isolated, ephemeral `__Host-` cookie (`SameSite=Lax`, `Path=/`, `HttpOnly`, `Secure`), mitigating Login CSRF attacks per RFC 6749 §10.12 and RFC 6265bis.
+- **Strict Step-Up Credential Protection:** Passkey registration ceremonies (`/register/start` and `/register/finish`) strictly mandate fresh Step-Up authentication, with challenges securely scoped per user.
 
 ## Quick Start
 
@@ -172,7 +175,7 @@ Korgan is engineered to comply with modern IETF standards and federal security g
 | Standard / RFC | Category | System Component | Implementation Details |
 | :--- | :--- | :--- | :--- |
 | RFC 9562 | Identifiers | domain::value_objects::ids | UUIDv7 Everywhere: 128-bit time-ordered, monotonic primary keys featuring millisecond-level UNIX epoch timestamps and cryptographically secure entropy. Prevents PostgreSQL B-Tree index fragmentation and guarantees optimal sequential insert locality. |
-| RFC 8037 / RFC 7517 | Cryptography and Discovery | adapters::outbound::crypto::jwt, handlers::jwks | Ed25519 (EdDSA) and JWKS: Asymmetric JWT access token signing with public verification keys exposed at GET /.well-known/jwks.json. Implements RFC 7638 SHA-256 key thumbprint matching for seamless key rotation. |
+| RFC 8037 / RFC 7517 | Cryptography and Discovery | adapters::outbound::crypto::jwt, handlers::jwks | Ed25519 (EdDSA) and JWKS: Asymmetric JWT access token signing with public verification keys exposed at GET /.well-known/jwks.json. Implements RFC 7638 SHA-256 key thumbprint matching for zero-downtime key rotation. |
 | RFC 8176 | Token Authentication | ports::services::AccessTokenClaims | Authentication Method References (AMR): Access tokens explicitly declare the exact authentication vectors utilized during session creation (e.g. ["pwd"], ["pwd", "mfa"], ["passkey"]). Downstream services enforce granular authorization based on authentication strength. |
 | RFC 7519 / OIDC Core | Token Claims | ports::services::AccessTokenClaims | Immutable auth_time Enforcement: The initial authentication timestamp is preserved across subsequent refresh token rotations within the token family, enabling downstream microservices to demand step-up re-authentication for privileged operations. |
 | RFC 6238 | Multi-Factor Auth | adapters::outbound::crypto::totp, use_cases::mfa | Time-Based One-Time Passwords (TOTP): HMAC-SHA1 algorithm, 30-second time step, +/-1 step clock-drift tolerance with atomic Redis replay locks (SET ... EX 120 NX). TOTP secrets are encrypted at rest with AES-256-GCM using UserId as Associated Authenticated Data (AAD). |

@@ -964,11 +964,12 @@ fn dummy_login_credential() -> serde_json::Value {
 #[tokio::test]
 async fn test_passkey_registration_flow_and_anti_replay() -> TestResult {
     let ctx = setup_passkey_app()?;
-    let user = User::new(
+    let mut user = User::new(
         EmailAddress::parse("passkey.user@example.com")?,
         Some(Username::new("passkeyuser")?),
         None,
     );
+    user.verify_email(Utc::now());
     ctx.user_repo.create(&user).await?;
 
     let token = create_auth_token(&ctx, user.id, UserRole::User).await?;
@@ -990,7 +991,7 @@ async fn test_passkey_registration_flow_and_anti_replay() -> TestResult {
     let challenge_id = start_resp.challenge_id;
 
     // Verify challenge is stored in TokenStore with 120s TTL
-    let cache_key = format!("passkey:reg:{challenge_id}");
+    let cache_key = format!("passkey:reg:{}:{challenge_id}", user.id);
     assert!(ctx.token_store.get_token(&cache_key).await?.is_some());
 
     // 2. Finish registration
@@ -1041,11 +1042,12 @@ async fn test_passkey_registration_flow_and_anti_replay() -> TestResult {
 #[tokio::test]
 async fn test_passkey_discoverable_login_and_cookie_issuance() -> TestResult {
     let ctx = setup_passkey_app()?;
-    let user = User::new(
+    let mut user = User::new(
         EmailAddress::parse("login.passkey@example.com")?,
         Some(Username::new("loginpasskey")?),
         None,
     );
+    user.verify_email(Utc::now());
     ctx.user_repo.create(&user).await?;
 
     // Pre-register sample passkey
@@ -1171,11 +1173,12 @@ async fn test_passkey_discoverable_login_and_cookie_issuance() -> TestResult {
 #[tokio::test]
 async fn test_passkey_yubikey_clone_detection_counter_rollback() -> TestResult {
     let ctx = setup_passkey_app()?;
-    let user = User::new(
+    let mut user = User::new(
         EmailAddress::parse("yubikey.clone@example.com")?,
         Some(Username::new("yubikeyuser")?),
         None,
     );
+    user.verify_email(Utc::now());
     ctx.user_repo.create(&user).await?;
 
     // Pre-register physical YubiKey with hardware counter = 2
@@ -1270,21 +1273,23 @@ async fn test_passkey_listing_and_deletion_security() -> TestResult {
     let ctx = setup_passkey_app()?;
 
     // User A
-    let user_a = User::new(
+    let mut user_a = User::new(
         EmailAddress::parse("usera@example.com")?,
         Some(Username::new("usera")?),
         None,
     );
+    user_a.verify_email(Utc::now());
     ctx.user_repo.create(&user_a).await?;
     let token_a = create_auth_token(&ctx, user_a.id, UserRole::User).await?;
     let auth_a = format!("Bearer {token_a}");
 
     // User B
-    let user_b = User::new(
+    let mut user_b = User::new(
         EmailAddress::parse("userb@example.com")?,
         Some(Username::new("userb")?),
         None,
     );
+    user_b.verify_email(Utc::now());
     ctx.user_repo.create(&user_b).await?;
 
     // Register passkeys: 2 for User A, 1 for User B

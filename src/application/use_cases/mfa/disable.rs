@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use validator::Validate;
 
 use crate::application::dto::DisableTotpCommand;
@@ -52,7 +51,7 @@ impl DisableTotpUseCase {
     pub async fn execute(&self, cmd: DisableTotpCommand) -> Result<(), AppError> {
         cmd.validate()?;
 
-        let mut user = self
+        let user = self
             .user_repo
             .find_by_id(&cmd.user_id)
             .await?
@@ -79,10 +78,6 @@ impl DisableTotpUseCase {
         }
 
         self.user_repo.delete_mfa(&user.id).await?;
-
-        let now = Utc::now();
-        user.disable_mfa(now);
-        self.user_repo.update(&user).await?;
 
         self.event_bus
             .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(

@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use sqlx::PgPool;
 
-use crate::adapters::outbound::postgres::models::OAuthAccountRow;
-use crate::domain::entities::{OAuthAccount, OAuthProvider};
+use crate::adapters::outbound::postgres::models::{OAuthAccountRow, PgAccountStatus};
+use crate::domain::entities::{OAuthAccount, OAuthProvider, User};
 use crate::domain::value_objects::UserId;
 use crate::ports::errors::PortError;
 use crate::ports::repositories::OAuthAccountRepository;
@@ -92,6 +92,96 @@ impl OAuthAccountRepository for PostgresOAuthAccountRepository {
         .execute(&self.pool)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "create oauth account"))?;
+
+        Ok(())
+    }
+
+    async fn link_oauth_account(
+        &self,
+        user: Option<&User>,
+        account: &OAuthAccount,
+    ) -> Result<(), PortError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| Self::map_sqlx_error(e, "begin link_oauth_account transaction"))?;
+
+        if let Some(user) = user {
+            let pg_status: PgAccountStatus = user.status.into();
+            let user_uuid = user.id.to_uuid();
+            let username_str = user.username.as_ref().map(|u| u.as_str());
+            let failed_attempts = i16::try_from(user.failed_login_attempts).unwrap_or(i16::MAX);
+            let password_hash_str = user.password_hash.as_ref().map(|p| p.as_str());
+
+            sqlx::query!(
+                r#"
+            INSERT INTO users (
+                id,
+                email,
+                username,
+                password_hash,
+                status,
+                role,
+                email_verified_at,
+                mfa_enabled,
+                failed_login_attempts,
+                locked_until,
+                deletion_scheduled_at,
+                created_at,
+                updated_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+            )
+            "#,
+                user_uuid,
+                user.email.as_str(),
+                username_str,
+                password_hash_str,
+                pg_status as PgAccountStatus,
+                user.role.as_str(),
+                user.email_verified_at,
+                user.mfa_enabled,
+                failed_attempts,
+                user.locked_until,
+                user.deletion_scheduled_at,
+                user.created_at,
+                user.updated_at
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Self::map_sqlx_error(e, "create user in link_oauth_account"))?;
+        }
+
+        let id_uuid = account.id.to_uuid();
+        let user_uuid = account.user_id.to_uuid();
+        let provider_str = account.provider.as_str();
+
+        sqlx::query!(
+            r#"
+            INSERT INTO oauth_accounts (
+                id,
+                user_id,
+                provider,
+                provider_user_id,
+                created_at
+            ) VALUES (
+                $1, $2, $3, $4, $5
+            )
+            "#,
+            id_uuid,
+            user_uuid,
+            provider_str,
+            account.provider_user_id,
+            account.created_at
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Self::map_sqlx_error(e, "create oauth account in link_oauth_account"))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| Self::map_sqlx_error(e, "commit link_oauth_account transaction"))?;
 
         Ok(())
     }

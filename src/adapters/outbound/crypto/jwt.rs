@@ -16,7 +16,8 @@ use crate::ports::services::{AccessTokenClaims, TokenSigner};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JwtHeader {
     alg: String,
-    typ: String,
+    #[serde(default)]
+    typ: Option<String>,
     #[serde(default)]
     kid: Option<String>,
 }
@@ -146,7 +147,7 @@ impl TokenSigner for Ed25519JwtService {
     fn sign_access_token(&self, claims: &AccessTokenClaims) -> Result<String, PortError> {
         let header = JwtHeader {
             alg: "EdDSA".to_string(),
-            typ: "at+jwt".to_string(),
+            typ: Some("at+jwt".to_string()),
             kid: Some(self.kid.clone()),
         };
 
@@ -191,6 +192,20 @@ impl TokenSigner for Ed25519JwtService {
             )));
         }
 
+        match header.typ.as_deref() {
+            Some("at+jwt") | Some("application/at+jwt") => {}
+            Some(typ) => {
+                return Err(PortError::security(format!(
+                    "invalid JWT typ '{typ}', expected 'at+jwt'"
+                )));
+            }
+            None => {
+                return Err(PortError::security(
+                    "missing or empty JWT typ header parameter, expected 'at+jwt'",
+                ));
+            }
+        }
+
         let kid = match &header.kid {
             Some(k) if !k.trim().is_empty() => k,
             _ => {
@@ -212,9 +227,9 @@ impl TokenSigner for Ed25519JwtService {
             PortError::security(format!("invalid Ed25519 signature length/format: {e}"))
         })?;
 
-        let signing_input = format!("{header_b64}.{payload_b64}");
+        let signing_input = &token.as_bytes()[..header_b64.len() + 1 + payload_b64.len()];
         verifying_key
-            .verify(signing_input.as_bytes(), &signature)
+            .verify(signing_input, &signature)
             .map_err(|e| PortError::security(format!("JWT signature verification failed: {e}")))?;
 
         let payload_bytes = BASE64_URL_SAFE_NO_PAD
@@ -647,6 +662,118 @@ mod tests {
         };
         assert!(err_msg.contains("JWT signature verification failed"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_token_with_missing_typ() -> TestResult {
+        let service = Ed25519JwtService::generate(Some("test-key-1".to_string()))?;
+        let now = Utc::now();
+        let claims = AccessTokenClaims {
+            sub: UserId::new(),
+            sid: SessionId::new(),
+            iss: "https://auth.korgan.local".to_string(),
+            aud: "korgan".to_string(),
+            exp: now.timestamp() + 3600,
+            iat: now.timestamp(),
+            jti: uuid::Uuid::now_v7().to_string(),
+            auth_time: now.timestamp(),
+            amr: vec!["pwd".to_string()],
+        };
+
+        let header = serde_json::json!({
+            "alg": "EdDSA",
+            "kid": "test-key-1"
+        });
+        let header_b64 = BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header)?);
+        let payload_b64 = BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?);
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let signature = service.signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = BASE64_URL_SAFE_NO_PAD.encode(signature.to_bytes());
+        let token = format!("{signing_input}.{sig_b64}");
+
+        let err = service.verify_access_token(&token);
+        let err_msg = match err {
+            Err(e) => e.to_string(),
+            Ok(_) => return Err("expected error for missing typ".into()),
+        };
+        assert!(err_msg.contains("missing or empty JWT typ header parameter, expected 'at+jwt'"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_token_with_invalid_typ() -> TestResult {
+        let service = Ed25519JwtService::generate(Some("test-key-1".to_string()))?;
+        let now = Utc::now();
+        let claims = AccessTokenClaims {
+            sub: UserId::new(),
+            sid: SessionId::new(),
+            iss: "https://auth.korgan.local".to_string(),
+            aud: "korgan".to_string(),
+            exp: now.timestamp() + 3600,
+            iat: now.timestamp(),
+            jti: uuid::Uuid::now_v7().to_string(),
+            auth_time: now.timestamp(),
+            amr: vec!["pwd".to_string()],
+        };
+
+        for invalid_typ in &["JWT", "refresh+jwt", "id+jwt", ""] {
+            let header = serde_json::json!({
+                "alg": "EdDSA",
+                "typ": invalid_typ,
+                "kid": "test-key-1"
+            });
+            let header_b64 = BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header)?);
+            let payload_b64 = BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?);
+            let signing_input = format!("{header_b64}.{payload_b64}");
+            let signature = service.signing_key.sign(signing_input.as_bytes());
+            let sig_b64 = BASE64_URL_SAFE_NO_PAD.encode(signature.to_bytes());
+            let token = format!("{signing_input}.{sig_b64}");
+
+            let err = service.verify_access_token(&token);
+            assert!(
+                err.is_err(),
+                "expected error for invalid typ '{invalid_typ}'"
+            );
+            let err_msg = match err {
+                Err(e) => e.to_string(),
+                Ok(_) => return Err("expected error".into()),
+            };
+            assert!(err_msg.contains("invalid JWT typ"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_token_with_application_at_jwt_typ() -> TestResult {
+        let service = Ed25519JwtService::generate(Some("test-key-1".to_string()))?;
+        let now = Utc::now();
+        let claims = AccessTokenClaims {
+            sub: UserId::new(),
+            sid: SessionId::new(),
+            iss: "https://auth.korgan.local".to_string(),
+            aud: "korgan".to_string(),
+            exp: now.timestamp() + 3600,
+            iat: now.timestamp(),
+            jti: uuid::Uuid::now_v7().to_string(),
+            auth_time: now.timestamp(),
+            amr: vec!["pwd".to_string()],
+        };
+
+        let header = serde_json::json!({
+            "alg": "EdDSA",
+            "typ": "application/at+jwt",
+            "kid": "test-key-1"
+        });
+        let header_b64 = BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header)?);
+        let payload_b64 = BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?);
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let signature = service.signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = BASE64_URL_SAFE_NO_PAD.encode(signature.to_bytes());
+        let token = format!("{signing_input}.{sig_b64}");
+
+        let verified = service.verify_access_token(&token)?;
+        assert_eq!(verified.sub, claims.sub);
         Ok(())
     }
 }

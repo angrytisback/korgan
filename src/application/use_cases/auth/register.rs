@@ -85,12 +85,18 @@ impl RegisterUserUseCase {
         }
 
         if self.user_repo.find_by_email(&email).await?.is_some() {
+            self.password_hasher
+                .compute_dummy_hash(&raw_password)
+                .await?;
             return Err(AppError::Conflict);
         }
 
         if let Some(ref u) = username
             && self.user_repo.find_by_username(u).await?.is_some()
         {
+            self.password_hasher
+                .compute_dummy_hash(&raw_password)
+                .await?;
             return Err(AppError::Conflict);
         }
 

@@ -52,6 +52,13 @@ pub enum AppError {
     #[error("resource conflict")]
     Conflict,
 
+    /// A concurrent token refresh was detected within the grace window; the client should retry.
+    #[error("concurrent token refresh in progress")]
+    ConcurrentRefresh {
+        /// Suggested retry delay in seconds.
+        retry_after_secs: u64,
+    },
+
     /// The caller exceeded a rate limit.
     #[error("rate limit exceeded")]
     RateLimited {
@@ -76,6 +83,12 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// Creates a concurrent refresh error with recommended retry delay.
+    #[must_use]
+    pub const fn concurrent_refresh(retry_after_secs: u64) -> Self {
+        Self::ConcurrentRefresh { retry_after_secs }
+    }
+
     /// Wraps an unexpected failure, preserving its cause for logging.
     pub fn internal(context: &'static str, source: impl Into<BoxError>) -> Self {
         Self::Internal {

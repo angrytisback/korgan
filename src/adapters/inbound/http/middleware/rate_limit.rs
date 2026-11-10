@@ -78,16 +78,13 @@ pub async fn rate_limit_middleware(
             .into_response();
 
         let headers = response.headers_mut();
-        if let Ok(val) = HeaderValue::from_str(&limit.to_string()) {
-            headers.insert(RATELIMIT_LIMIT.clone(), val);
-        }
+        headers.insert(RATELIMIT_LIMIT.clone(), HeaderValue::from(limit));
         headers.insert(RATELIMIT_REMAINING.clone(), HeaderValue::from_static("0"));
-        if let Ok(val) = HeaderValue::from_str(&rate_status.reset_epoch_secs.to_string()) {
-            headers.insert(RATELIMIT_RESET.clone(), val);
-        }
-        if let Ok(val) = HeaderValue::from_str(&retry_after.to_string()) {
-            headers.insert(http::header::RETRY_AFTER, val);
-        }
+        headers.insert(
+            RATELIMIT_RESET.clone(),
+            HeaderValue::from(rate_status.reset_epoch_secs),
+        );
+        headers.insert(http::header::RETRY_AFTER, HeaderValue::from(retry_after));
 
         return response;
     }
@@ -95,15 +92,15 @@ pub async fn rate_limit_middleware(
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
 
-    if let Ok(val) = HeaderValue::from_str(&limit.to_string()) {
-        headers.insert(RATELIMIT_LIMIT.clone(), val);
-    }
-    if let Ok(val) = HeaderValue::from_str(&rate_status.remaining.to_string()) {
-        headers.insert(RATELIMIT_REMAINING.clone(), val);
-    }
-    if let Ok(val) = HeaderValue::from_str(&rate_status.reset_epoch_secs.to_string()) {
-        headers.insert(RATELIMIT_RESET.clone(), val);
-    }
+    headers.insert(RATELIMIT_LIMIT.clone(), HeaderValue::from(limit));
+    headers.insert(
+        RATELIMIT_REMAINING.clone(),
+        HeaderValue::from(rate_status.remaining),
+    );
+    headers.insert(
+        RATELIMIT_RESET.clone(),
+        HeaderValue::from(rate_status.reset_epoch_secs),
+    );
 
     response
 }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use validator::Validate;
+use zeroize::Zeroize;
 
 use crate::application::dto::{EnableTotpCommand, TotpEnabledResult};
 use crate::application::error::AppError;
@@ -64,17 +65,21 @@ impl EnableTotpUseCase {
         let pending_key = format!("pending_totp:{}", cmd.user_id);
         let maybe_secret_str = self.token_store.get_token(&pending_key).await?;
 
-        let secret_str = match maybe_secret_str {
+        let mut secret_str = match maybe_secret_str {
             Some(s) => s,
             None => return Err(AppError::TokenExpired),
         };
 
-        let secret_bytes = decode_base32(&secret_str).ok_or_else(|| {
-            AppError::internal(
-                "corrupt pending TOTP secret",
-                std::io::Error::other("invalid base32"),
-            )
-        })?;
+        let mut secret_bytes = match decode_base32(&secret_str) {
+            Some(b) => b,
+            None => {
+                secret_str.zeroize();
+                return Err(AppError::internal(
+                    "corrupt pending TOTP secret",
+                    std::io::Error::other("invalid base32"),
+                ));
+            }
+        };
 
         let now = Utc::now();
         let is_valid =
@@ -82,6 +87,8 @@ impl EnableTotpUseCase {
                 .verify_code(&secret_bytes, &cmd.code, now.timestamp() as u64)?;
 
         if !is_valid {
+            secret_bytes.zeroize();
+            secret_str.zeroize();
             return Err(AppError::Validation(vec![FieldViolation::new(
                 "code",
                 "invalid TOTP code",
@@ -96,25 +103,23 @@ impl EnableTotpUseCase {
             .secret_cipher
             .encrypt_with_aad(&secret_bytes, cmd.user_id.as_bytes())?;
 
+        // Zeroize plaintext secrets in memory immediately after encryption
+        secret_bytes.zeroize();
+        secret_str.zeroize();
+
         // Generate 10 single-use backup codes
         let (plaintexts, hashes) = generate_backup_codes(10);
 
         let mut mfa = UserMfa::new(cmd.user_id, ciphertext, nonce, hashes);
         mfa.verify(now);
-        self.user_repo.save_mfa(&mfa).await?;
-
-        let mut user = self
-            .user_repo
-            .find_by_id(&cmd.user_id)
-            .await?
-            .ok_or(AppError::Unauthenticated)?;
-
-        user.enable_mfa(now);
-        self.user_repo.update(&user).await?;
+        self.user_repo.enable_mfa(&mfa).await.map_err(|e| match e {
+            crate::ports::errors::PortError::NotFound { .. } => AppError::Unauthenticated,
+            other => AppError::from(other),
+        })?;
 
         self.event_bus
             .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
-                Some(user.id),
+                Some(cmd.user_id),
                 cmd.ip_address,
                 cmd.user_agent,
                 cmd.request_id,

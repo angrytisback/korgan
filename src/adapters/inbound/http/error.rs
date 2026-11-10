@@ -402,6 +402,9 @@ impl From<AppError> for ApiError {
             AppError::Forbidden => Self::new(ErrorKind::Forbidden),
             AppError::NotFound => Self::new(ErrorKind::NotFound),
             AppError::Conflict => Self::new(ErrorKind::Conflict),
+            AppError::ConcurrentRefresh { retry_after_secs } => Self::new(ErrorKind::Conflict)
+                .with_detail("A concurrent token refresh is in progress. Please retry.")
+                .with_retry_after(retry_after_secs),
             AppError::RateLimited { retry_after_secs } => {
                 Self::new(ErrorKind::RateLimited).with_retry_after(retry_after_secs)
             }

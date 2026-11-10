@@ -210,6 +210,11 @@ impl PasswordHasher for Argon2PasswordHasher {
         let _ = self.verify_password(password, &self.dummy_hash).await?;
         Ok(())
     }
+
+    async fn compute_dummy_hash(&self, password: &RawPassword) -> Result<(), PortError> {
+        let _ = self.hash_password(password).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -242,6 +247,15 @@ mod tests {
         let raw = RawPassword::new("NonExistentUserPassword123!")?;
 
         hasher.verify_against_dummy_hash(&raw).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dummy_hash_computation_always_completes_safely() -> TestResult {
+        let hasher = Argon2PasswordHasher::new(1024, 1, 1)?;
+        let raw = RawPassword::new("DuplicateUserPassword123!")?;
+
+        hasher.compute_dummy_hash(&raw).await?;
         Ok(())
     }
 

@@ -67,6 +67,7 @@ impl ForgotPasswordUseCase {
 
         if let Some(ref email) = maybe_email
             && let Ok(Some(user)) = self.user_repo.find_by_email(email).await
+            && user.status == crate::domain::entities::AccountStatus::Active
         {
             let (raw_token, token_hash) = generate_opaque_token();
             let key = format!("reset_password:{token_hash}");

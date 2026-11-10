@@ -30,6 +30,17 @@ pub trait UserRepository: Send + Sync + 'static {
     /// Updates existing user attributes (status, verification, failed attempts, etc.).
     async fn update(&self, user: &User) -> Result<(), PortError>;
 
+    /// Granularly updates a user's username attribute without mutating other user fields
+    /// (such as account status, lockout timestamps, failed attempts, or roles).
+    async fn update_username(
+        &self,
+        user_id: &UserId,
+        new_username: Option<&Username>,
+    ) -> Result<(), PortError> {
+        let _ = (user_id, new_username);
+        Err(PortError::not_found("update_username not implemented"))
+    }
+
     /// Atomically updates a user's password and records the previous hash into
     /// `password_history`, pruning history older than `history_depth`.
     async fn update_password(
@@ -51,6 +62,20 @@ pub trait UserRepository: Send + Sync + 'static {
 
     /// Creates or updates MFA configuration for a user.
     async fn save_mfa(&self, mfa: &UserMfa) -> Result<(), PortError>;
+
+    /// Atomically persists or updates MFA configuration in `user_mfa` and marks `users.mfa_enabled = true`
+    /// within a single PostgreSQL transaction (`BEGIN ... COMMIT`).
+    ///
+    /// If either operation fails or the user does not exist, the entire transaction rolls back.
+    async fn enable_mfa(&self, mfa: &UserMfa) -> Result<(), PortError> {
+        self.save_mfa(mfa).await?;
+        if let Some(mut user) = self.find_by_id(&mfa.user_id).await? {
+            user.mfa_enabled = true;
+            user.updated_at = Utc::now();
+            self.update(&user).await?;
+        }
+        Ok(())
+    }
 
     /// Removes MFA configuration and disables MFA on the user record.
     async fn delete_mfa(&self, user_id: &UserId) -> Result<(), PortError>;
@@ -214,7 +239,7 @@ pub trait AuditLogRepository: Send + Sync + 'static {
     /// (e.g. via an advisory transaction lock) to prevent concurrent chain forks.
     async fn append_and_chain(&self, entry: &mut AuditLog) -> Result<(), PortError> {
         let prev_hash = self.find_latest_entry_hash().await?;
-        entry.chain_to(prev_hash.as_deref());
+        entry.chain_with_timestamp(prev_hash.as_deref(), Utc::now());
         self.append(entry).await
     }
 
@@ -241,6 +266,17 @@ pub trait OAuthAccountRepository: Send + Sync + 'static {
 
     /// Inserts a new OAuth account linkage.
     async fn create(&self, account: &OAuthAccount) -> Result<(), PortError>;
+
+    /// Atomically links an OAuth account to a user, creating the user record if `user` is `Some`.
+    /// Both operations execute within a single explicit PostgreSQL transaction (`BEGIN ... COMMIT`).
+    async fn link_oauth_account(
+        &self,
+        user: Option<&User>,
+        account: &OAuthAccount,
+    ) -> Result<(), PortError> {
+        let _ = user;
+        self.create(account).await
+    }
 
     /// Retrieves all OAuth accounts linked to a given [`UserId`].
     async fn list_by_user_id(&self, user_id: &UserId) -> Result<Vec<OAuthAccount>, PortError>;

@@ -48,8 +48,21 @@ impl FromRequestParts<AppState> for AuthUser {
             return Err(ApiError::new(ErrorKind::TokenExpired));
         }
 
-        // Validate issuer and audience claims are non-empty
-        if claims.iss.trim().is_empty() || claims.aud.trim().is_empty() {
+        // Validate issuer and audience claims match server configuration exactly
+        if claims.iss != state.settings.auth.issuer {
+            tracing::warn!(
+                claim_iss = %claims.iss,
+                expected_iss = %state.settings.auth.issuer,
+                "rejecting access token with mismatched issuer claim"
+            );
+            return Err(ApiError::new(ErrorKind::TokenInvalid));
+        }
+        if claims.aud != state.settings.auth.audience {
+            tracing::warn!(
+                claim_aud = %claims.aud,
+                expected_aud = %state.settings.auth.audience,
+                "rejecting access token with mismatched audience claim"
+            );
             return Err(ApiError::new(ErrorKind::TokenInvalid));
         }
 
@@ -91,12 +104,17 @@ impl FromRequestParts<AppState> for AuthUser {
             .ok_or_else(|| ApiError::new(ErrorKind::TokenInvalid))?;
 
         match user.status {
+            AccountStatus::Active => {}
+            AccountStatus::Unverified => {
+                return Err(
+                    ApiError::new(ErrorKind::Forbidden).with_detail("e-mail verification required")
+                );
+            }
             AccountStatus::Suspended
             | AccountStatus::Deactivated
             | AccountStatus::PendingDeletion => {
                 return Err(ApiError::new(ErrorKind::Forbidden));
             }
-            AccountStatus::Active | AccountStatus::Unverified => {}
         }
 
         let user_id = claims.sub;

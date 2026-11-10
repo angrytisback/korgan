@@ -81,7 +81,7 @@ impl StartPasskeyRegistrationUseCase {
         let state_json = serde_json::to_string(&reg_state)
             .map_err(|e| AppError::internal("failed to serialize registration state", e))?;
 
-        let cache_key = format!("passkey:reg:{challenge_id}");
+        let cache_key = format!("passkey:reg:{user_id}:{challenge_id}");
         self.token_store
             .set_token(&cache_key, &state_json, self.challenge_ttl)
             .await?;

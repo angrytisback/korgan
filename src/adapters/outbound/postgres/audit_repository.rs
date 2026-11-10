@@ -1,6 +1,7 @@
 //! PostgreSQL implementation of [`AuditLogRepository`] with compile-time verified queries.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Duration, Utc};
 use ipnetwork::IpNetwork;
 use sqlx::PgPool;
 
@@ -9,6 +10,9 @@ use crate::domain::entities::AuditLog;
 use crate::domain::value_objects::UserId;
 use crate::ports::errors::PortError;
 use crate::ports::repositories::AuditLogRepository;
+
+/// Advisory transaction lock identifier for serializing audit log chain mutations.
+const AUDIT_LOCK_ID: i64 = 75_798_247;
 
 /// PostgreSQL audit log repository backed by `sqlx::PgPool`.
 #[derive(Debug, Clone)]
@@ -38,7 +42,8 @@ impl AuditLogRepository for PostgresAuditLogRepository {
             .await
             .map_err(|e| Self::map_sqlx_error(e, "begin transaction"))?;
 
-        sqlx::query("SELECT pg_advisory_xact_lock(75798247);")
+        sqlx::query("SELECT pg_advisory_xact_lock($1);")
+            .bind(AUDIT_LOCK_ID)
             .execute(&mut *tx)
             .await
             .map_err(|e| Self::map_sqlx_error(e, "acquire advisory xact lock"))?;
@@ -100,14 +105,15 @@ impl AuditLogRepository for PostgresAuditLogRepository {
             .map_err(|e| Self::map_sqlx_error(e, "begin transaction"))?;
 
         // Prevent concurrent chain forks across horizontal korgan instances
-        sqlx::query("SELECT pg_advisory_xact_lock(75798247);")
+        sqlx::query("SELECT pg_advisory_xact_lock($1);")
+            .bind(AUDIT_LOCK_ID)
             .execute(&mut *tx)
             .await
             .map_err(|e| Self::map_sqlx_error(e, "acquire advisory xact lock"))?;
 
-        let row: Option<(Option<String>,)> = sqlx::query_as(
+        let latest_row: Option<(DateTime<Utc>, Option<String>)> = sqlx::query_as(
             r#"
-            SELECT entry_hash
+            SELECT created_at, entry_hash
             FROM audit_logs
             WHERE entry_hash IS NOT NULL
             ORDER BY created_at DESC, id DESC
@@ -118,8 +124,18 @@ impl AuditLogRepository for PostgresAuditLogRepository {
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_latest_entry_hash"))?;
 
-        let prev_hash = row.and_then(|(hash,)| hash);
-        entry.chain_to(prev_hash.as_deref());
+        let prev_hash = latest_row.as_ref().and_then(|(_, hash)| hash.clone());
+
+        // Strictly monotonic timestamping: ensure created_at is strictly greater than the previous entry
+        let now = Utc::now();
+        let monotonic_created_at = match &latest_row {
+            Some((prev_created_at, _)) if now <= *prev_created_at => {
+                *prev_created_at + Duration::microseconds(1)
+            }
+            _ => now,
+        };
+
+        entry.chain_with_timestamp(prev_hash.as_deref(), monotonic_created_at);
 
         let log_id = entry.id.to_uuid();
         let user_uuid = entry.user_id.as_ref().map(|u| u.to_uuid());

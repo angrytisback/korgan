@@ -129,13 +129,14 @@ pub async fn register_start(
         (status = 201, description = "Passkey credential registered successfully", body = PasskeyRegistrationFinishResponse),
         (status = 400, description = "Challenge expired or invalid", body = ProblemDetails),
         (status = 401, description = "Authentication required or verification failed", body = ProblemDetails),
+        (status = 403, description = "Step-up authentication required", body = ProblemDetails),
         (status = 422, description = "Validation failed", body = ProblemDetails),
         (status = 500, description = "Unexpected server error", body = ProblemDetails)
     )
 )]
 pub async fn register_finish(
     State(state): State<AppState>,
-    auth_user: AuthUser,
+    auth_user: StepUpUser,
     metadata: ClientMetadata,
     Json(req): Json<PasskeyRegistrationFinishRequest>,
 ) -> Result<(StatusCode, Json<PasskeyRegistrationFinishResponse>), ApiError> {
