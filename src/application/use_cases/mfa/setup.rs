@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use validator::Validate;
+use zeroize::Zeroize;
 
 use crate::application::dto::{SetupTotpCommand, TotpSetupResult};
 use crate::application::error::AppError;
@@ -67,12 +68,13 @@ impl SetupTotpUseCase {
             .await?
             .ok_or(AppError::Unauthenticated)?;
 
-        let secret_bytes = self.totp_service.generate_secret()?;
+        let mut secret_bytes = self.totp_service.generate_secret()?;
         let qr_code_svg =
             self.totp_service
                 .generate_qr_code_svg(&user.email, &secret_bytes, &self.issuer)?;
 
         let base32_secret = encode_base32(&secret_bytes);
+        secret_bytes.zeroize();
         let pending_key = format!("pending_totp:{}", user.id);
 
         self.token_store

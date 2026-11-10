@@ -5,7 +5,9 @@
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum_extra::extract::CookieJar;
+use axum::response::{IntoResponse, Response};
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use cookie::time::Duration as CookieDuration;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -55,15 +57,29 @@ pub struct OAuthCallbackQuery {
 )]
 pub async fn generate_url(
     State(state): State<AppState>,
+    jar: CookieJar,
     Path(provider_str): Path<String>,
-) -> Result<Json<OAuthUrlResponse>, ApiError> {
+) -> Result<(CookieJar, Json<OAuthUrlResponse>), ApiError> {
     let provider = OAuthProvider::parse(&provider_str)?;
     let res = state.generate_oauth_url_use_case.execute(provider).await?;
 
-    Ok(Json(OAuthUrlResponse {
-        url: res.url,
-        state: res.state,
-    }))
+    let host_state_cookie = Cookie::build(("__Host-oauth_state", res.state.clone()))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .max_age(CookieDuration::seconds(300))
+        .build();
+
+    let updated_jar = jar.add(host_state_cookie);
+
+    Ok((
+        updated_jar,
+        Json(OAuthUrlResponse {
+            url: res.url,
+            state: res.state,
+        }),
+    ))
 }
 
 /// Processes an external OAuth2 identity provider callback.
@@ -90,25 +106,60 @@ pub async fn callback(
     jar: CookieJar,
     Path(provider_str): Path<String>,
     Query(query): Query<OAuthCallbackQuery>,
-) -> Result<(CookieJar, Json<AuthTokensResponse>), ApiError> {
-    let provider = OAuthProvider::parse(&provider_str)?;
+) -> (CookieJar, Response) {
+    let cookie_state = jar
+        .get("__Host-oauth_state")
+        .or_else(|| jar.get("oauth_state"))
+        .map(|c| c.value().to_owned());
 
-    let cmd = OAuthCallbackCommand {
-        provider,
-        code: query.code,
-        state: query.state,
-        ip_address: metadata.ip,
-        user_agent: metadata.user_agent,
-        device_name: metadata.device_name,
-        request_id: metadata.request_id,
-    };
+    // Ensure anti-CSRF cookie is cleared with Max-Age=0 across all response branches
+    let clear_host_cookie = Cookie::build(("__Host-oauth_state", ""))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .max_age(CookieDuration::seconds(0))
+        .build();
+    let clear_fallback_cookie = Cookie::build(("oauth_state", ""))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .max_age(CookieDuration::seconds(0))
+        .build();
+    let cleared_jar = jar.add(clear_host_cookie).add(clear_fallback_cookie);
 
-    let tokens = state.oauth_callback_use_case.execute(cmd).await?;
-
-    let mut updated_jar = jar;
-    if metadata.client_type.is_web() {
-        updated_jar = attach_auth_cookies(updated_jar, &tokens, &state);
+    let execute_result: Result<crate::application::dto::AuthTokensResult, ApiError> = async {
+        let provider = OAuthProvider::parse(&provider_str)?;
+        let cmd = OAuthCallbackCommand {
+            provider,
+            code: query.code,
+            state: query.state,
+            cookie_state,
+            ip_address: metadata.ip,
+            user_agent: metadata.user_agent,
+            device_name: metadata.device_name,
+            request_id: metadata.request_id,
+        };
+        state
+            .oauth_callback_use_case
+            .execute(cmd)
+            .await
+            .map_err(ApiError::from)
     }
+    .await;
 
-    Ok((updated_jar, Json(tokens.into())))
+    match execute_result {
+        Ok(tokens) => {
+            let mut final_jar = cleared_jar;
+            if metadata.client_type.is_web() {
+                final_jar = attach_auth_cookies(final_jar, &tokens, &state);
+            }
+            (
+                final_jar,
+                Json(AuthTokensResponse::from(tokens)).into_response(),
+            )
+        }
+        Err(err) => (cleared_jar, err.into_response()),
+    }
 }

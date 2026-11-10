@@ -100,9 +100,13 @@ impl OAuthCallbackUseCase {
         &self,
         cmd: OAuthCallbackCommand,
     ) -> Result<AuthTokensResult, AppError> {
-        // 1. Validate anti-CSRF state parameter
+        // 1. Validate anti-CSRF state parameter and browser cookie binding (RFC 6749 Section 10.12)
+        let cookie_matches = cmd.cookie_state.as_deref().is_some_and(|c| c == cmd.state);
+
         let state_key = format!("oauth:state:{}:{}", cmd.provider.as_str(), cmd.state);
-        let is_valid = self.token_store.consume_token(&state_key, "valid").await?;
+        // Anti-replay: State token must be consumed unconditionally on any callback attempt
+        let token_consumed = self.token_store.consume_token(&state_key, "valid").await?;
+        let is_valid = cookie_matches && token_consumed;
 
         if !is_valid {
             self.event_bus
@@ -114,7 +118,7 @@ impl OAuthCallbackUseCase {
                     audit_events::LOGIN_FAILED,
                     AuditEventStatus::Blocked,
                     serde_json::json!({
-                        "reason": "invalid_or_expired_oauth_state",
+                        "reason": if !cookie_matches { "oauth_state_cookie_mismatch" } else { "invalid_or_expired_oauth_state" },
                         "provider": cmd.provider.as_str()
                     }),
                 ))));
@@ -160,7 +164,7 @@ impl OAuthCallbackUseCase {
                 // Check if user already exists with the same verified email
                 let maybe_user = self.user_repo.find_by_email(&profile.email).await?;
 
-                let user = match maybe_user {
+                let (user, is_new_user) = match maybe_user {
                     Some(mut existing_user) => {
                         if existing_user.status == AccountStatus::Unverified {
                             // R1.3 Pre-account takeover defense:
@@ -216,20 +220,21 @@ impl OAuthCallbackUseCase {
                         } else {
                             existing_user.can_login(now)?;
                         }
-                        existing_user
+                        (existing_user, false)
                     }
                     None => {
                         let mut new_user = User::new(profile.email.clone(), None, None);
                         new_user.status = AccountStatus::Active;
                         new_user.email_verified_at = Some(now);
-                        self.user_repo.create(&new_user).await?;
-                        new_user
+                        (new_user, true)
                     }
                 };
 
                 let new_account =
                     OAuthAccount::new(user.id, cmd.provider, profile.provider_user_id);
-                self.oauth_repo.create(&new_account).await?;
+                self.oauth_repo
+                    .link_oauth_account(if is_new_user { Some(&user) } else { None }, &new_account)
+                    .await?;
                 user
             }
         };

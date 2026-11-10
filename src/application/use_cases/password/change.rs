@@ -144,7 +144,11 @@ impl ChangePasswordUseCase {
         // Invalidate other sessions and sync to Redis blacklist
         let revoked_ids = self
             .session_repo
-            .revoke_all_user_sessions(&user.id, None, "password_changed")
+            .revoke_all_user_sessions(
+                &user.id,
+                cmd.current_session_id.as_ref(),
+                "password_changed",
+            )
             .await?;
 
         let token_store = self.token_store.clone();

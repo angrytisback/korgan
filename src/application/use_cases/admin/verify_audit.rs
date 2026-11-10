@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
+
 use crate::application::error::AppError;
 use crate::ports::repositories::AuditLogRepository;
 
@@ -56,7 +58,22 @@ impl VerifyAuditChainUseCase {
         let entries = self.audit_repo.list_all_chronological().await?;
 
         let mut expected_prev: Option<&str> = None;
+        let mut prev_created_at: Option<DateTime<Utc>> = None;
+
         for (idx, entry) in entries.iter().enumerate() {
+            if let Some(prev_time) = prev_created_at
+                && entry.created_at < prev_time
+            {
+                return Ok(AuditVerificationResult::Corrupted(BrokenAuditLink {
+                    record_index: idx,
+                    log_id: entry.id.to_string(),
+                    reason: format!(
+                        "Monotonic timestamp violation at record index {idx}: record timestamp {} is earlier than previous record timestamp {}",
+                        entry.created_at, prev_time
+                    ),
+                }));
+            }
+
             if !entry.verify_integrity(expected_prev) {
                 return Ok(AuditVerificationResult::Corrupted(BrokenAuditLink {
                     record_index: idx,
@@ -68,6 +85,7 @@ impl VerifyAuditChainUseCase {
                 }));
             }
             expected_prev = entry.entry_hash.as_deref();
+            prev_created_at = Some(entry.created_at);
         }
 
         let verified_count = entries.len();

@@ -1,4 +1,4 @@
-//! Verification and regression tests for Phase 2 hardening layers:
+//! Verification and regression tests for security hardening layers:
 //! 1. Step-Up Authentication (auth_time & amr enforcement)
 //! 2. Outbound HTTP client 64KB body limit
 //! 3. Immutable audit logs & SHA-256 hash chain
@@ -366,7 +366,14 @@ impl AuditLogRepository for MockAuditRepo {
             .lock()
             .map_err(|e| PortError::database(e.to_string()))?;
         let prev_hash = lock.last().and_then(|e| e.entry_hash.clone());
-        entry.chain_to(prev_hash.as_deref());
+        let now = Utc::now();
+        let monotonic_created_at = match lock.last() {
+            Some(last) if now <= last.created_at => {
+                last.created_at + chrono::Duration::microseconds(1)
+            }
+            _ => now,
+        };
+        entry.chain_with_timestamp(prev_hash.as_deref(), monotonic_created_at);
         lock.push(entry.clone());
         Ok(())
     }
@@ -398,6 +405,20 @@ impl AuditLogRepository for MockAuditRepo {
             .lock()
             .map_err(|e| PortError::database(e.to_string()))?;
         Ok(lock.last().and_then(|e| e.entry_hash.clone()))
+    }
+
+    async fn list_all_chronological(&self) -> Result<Vec<AuditLog>, PortError> {
+        let lock = self
+            .entries
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        let mut list = lock.clone();
+        list.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(list)
     }
 }
 
@@ -1677,6 +1698,271 @@ async fn test_audit_log_concurrent_writers_produce_unforked_cryptographic_chain(
             "entry at index {idx} failed cryptographic integrity verification"
         );
     }
+
+    // Verify that VerifyAuditChainUseCase confirms entire chain is mathematically valid
+    let verify_use_case =
+        korgan::application::use_cases::admin::VerifyAuditChainUseCase::new(audit_repo);
+    let verify_result = verify_use_case.execute().await?;
+    assert_eq!(
+        verify_result,
+        korgan::application::use_cases::admin::AuditVerificationResult::Valid {
+            verified_count: 20
+        }
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_audit_log_high_concurrency_burst_resequences_out_of_order_events() -> TestResult {
+    let audit_repo = Arc::new(MockAuditRepo::default());
+    let mut handles = Vec::new();
+    let num_events = 50;
+
+    // Spawn 50 concurrent tasks with intentionally inverted/shuffled in-memory timestamps
+    for i in 0..num_events {
+        let repo = audit_repo.clone();
+        let handle = tokio::spawn(async move {
+            let mut entry = AuditLog::new(
+                None,
+                None,
+                None,
+                RequestId::new(),
+                format!("burst_event_{i}"),
+                AuditEventStatus::Success,
+                serde_json::json!({ "burst_seq": i }),
+            );
+            // Simulate skewed / inverted in-memory creation timestamp (e.g. earlier for later events)
+            entry.created_at = Utc::now() - chrono::Duration::seconds((num_events - i) as i64 * 10);
+            repo.append_and_chain(&mut entry).await
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.await??;
+    }
+
+    let entries = audit_repo.list_all_chronological().await?;
+    assert_eq!(
+        entries.len(),
+        num_events,
+        "all {num_events} burst entries must be recorded"
+    );
+
+    // Verify strict microsecond monotonicity and unbroken hash chain
+    for idx in 1..entries.len() {
+        let prev = &entries[idx - 1];
+        let curr = &entries[idx];
+
+        assert!(
+            curr.created_at > prev.created_at,
+            "entry at index {idx} timestamp {} not strictly greater than prev timestamp {}",
+            curr.created_at,
+            prev.created_at
+        );
+        assert_eq!(
+            curr.prev_hash, prev.entry_hash,
+            "entry at index {idx} broken link (fork detected)"
+        );
+        assert!(
+            curr.verify_integrity(prev.entry_hash.as_deref()),
+            "entry at index {idx} failed cryptographic integrity verification"
+        );
+    }
+
+    // Verify via VerifyAuditChainUseCase
+    let verify_use_case =
+        korgan::application::use_cases::admin::VerifyAuditChainUseCase::new(audit_repo);
+    let verify_result = verify_use_case.execute().await?;
+    assert_eq!(
+        verify_result,
+        korgan::application::use_cases::admin::AuditVerificationResult::Valid {
+            verified_count: num_events
+        }
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Audit Delimiter Collision & Anti-Enumeration Hardening Tests
+// ---------------------------------------------------------------------------
+
+struct CountingPasswordHasher {
+    inner: Argon2PasswordHasher,
+    dummy_count: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingPasswordHasher {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let inner = Argon2PasswordHasher::new(1024, 1, 1)?;
+        Ok(Self {
+            inner,
+            dummy_count: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl PasswordHasher for CountingPasswordHasher {
+    async fn hash_password(&self, password: &RawPassword) -> Result<PasswordHash, PortError> {
+        self.inner.hash_password(password).await
+    }
+
+    async fn verify_password(
+        &self,
+        password: &RawPassword,
+        hash: &PasswordHash,
+    ) -> Result<bool, PortError> {
+        self.inner.verify_password(password, hash).await
+    }
+
+    async fn verify_against_dummy_hash(&self, password: &RawPassword) -> Result<(), PortError> {
+        self.inner.verify_against_dummy_hash(password).await
+    }
+
+    async fn compute_dummy_hash(&self, password: &RawPassword) -> Result<(), PortError> {
+        self.dummy_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.compute_dummy_hash(password).await
+    }
+}
+
+#[test]
+fn test_audit_log_hash_canonical_delimiter_collision_resistance() {
+    let req_id = RequestId::new();
+    let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+    let fixed_time = Utc::now();
+    let shared_id = AuditLogId::new();
+
+    // Entry 1: actor_ip is None, user_agent is "127.0.0.1"
+    let mut entry1 = AuditLog::new(
+        None,
+        None,
+        Some("127.0.0.1".to_string()),
+        req_id,
+        "test_event",
+        AuditEventStatus::Success,
+        serde_json::json!({}),
+    );
+    entry1.id = shared_id;
+    entry1.created_at = fixed_time;
+
+    // Entry 2: actor_ip is 127.0.0.1, user_agent is None
+    let mut entry2 = AuditLog::new(
+        None,
+        Some(ip),
+        None,
+        req_id,
+        "test_event",
+        AuditEventStatus::Success,
+        serde_json::json!({}),
+    );
+    entry2.id = shared_id;
+    entry2.created_at = fixed_time;
+
+    let hash1 = entry1.compute_entry_hash(None);
+    let hash2 = entry2.compute_entry_hash(None);
+
+    // Canonical delimiters must guarantee distinct hashes despite identical character sequences
+    assert_ne!(
+        hash1, hash2,
+        "Collision detected: actor_ip and user_agent fields must not produce identical hash!"
+    );
+
+    // Entry 3: user_id is None, actor_ip is None, user_agent is None
+    let mut entry3 = AuditLog::new(
+        None,
+        None,
+        None,
+        req_id,
+        "test_event",
+        AuditEventStatus::Success,
+        serde_json::json!({}),
+    );
+    entry3.id = shared_id;
+    entry3.created_at = fixed_time;
+
+    let hash3 = entry3.compute_entry_hash(None);
+    assert_ne!(hash1, hash3);
+    assert_ne!(hash2, hash3);
+}
+
+#[tokio::test]
+async fn test_register_conflict_timing_anti_enumeration() -> TestResult {
+    use korgan::application::dto::RegisterCommand;
+    use korgan::application::error::AppError;
+    use korgan::application::use_cases::RegisterUserUseCase;
+
+    let user_repo = Arc::new(MockUserRepo::default());
+    let password_hasher = Arc::new(CountingPasswordHasher::new()?);
+    let token_store = Arc::new(MockTokenStore);
+    let hibp_client = Arc::new(NoopHibpClient);
+    let (event_bus, _rx) = EventBus::new(100);
+
+    let use_case = RegisterUserUseCase::new(
+        user_repo.clone(),
+        password_hasher.clone(),
+        token_store.clone(),
+        hibp_client.clone(),
+        event_bus,
+        Duration::from_secs(86400),
+    );
+
+    // Initial valid registration
+    let cmd1 = RegisterCommand {
+        email: "alice_crypto@example.com".to_owned(),
+        password: "StrongPassword123!".to_owned(),
+        username: Some("alice_crypto".to_owned()),
+        ip_address: None,
+        user_agent: None,
+        request_id: RequestId::new(),
+    };
+    use_case.execute(cmd1).await?;
+    assert_eq!(
+        password_hasher.dummy_count.load(Ordering::SeqCst),
+        0,
+        "Successful registration must not invoke dummy hash"
+    );
+
+    // Conflict 1: Duplicate email must invoke compute_dummy_hash
+    let cmd_dup_email = RegisterCommand {
+        email: "alice_crypto@example.com".to_owned(),
+        password: "StrongPassword123!".to_owned(),
+        username: Some("other_user".to_owned()),
+        ip_address: None,
+        user_agent: None,
+        request_id: RequestId::new(),
+    };
+    match use_case.execute(cmd_dup_email).await {
+        Err(AppError::Conflict) => {}
+        other => return Err(format!("expected Conflict, got {other:?}").into()),
+    }
+    assert_eq!(
+        password_hasher.dummy_count.load(Ordering::SeqCst),
+        1,
+        "Duplicate email conflict must invoke dummy hash calculation"
+    );
+
+    // Conflict 2: Duplicate username must invoke compute_dummy_hash
+    let cmd_dup_username = RegisterCommand {
+        email: "alice_crypto_new@example.com".to_owned(),
+        password: "StrongPassword123!".to_owned(),
+        username: Some("alice_crypto".to_owned()),
+        ip_address: None,
+        user_agent: None,
+        request_id: RequestId::new(),
+    };
+    match use_case.execute(cmd_dup_username).await {
+        Err(AppError::Conflict) => {}
+        other => return Err(format!("expected Conflict, got {other:?}").into()),
+    }
+    assert_eq!(
+        password_hasher.dummy_count.load(Ordering::SeqCst),
+        2,
+        "Duplicate username conflict must invoke dummy hash calculation"
+    );
 
     Ok(())
 }

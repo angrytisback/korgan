@@ -25,6 +25,8 @@ pub struct OAuthCallbackCommand {
     pub code: String,
     /// Anti-CSRF state parameter returned by provider.
     pub state: String,
+    /// Anti-CSRF state parameter retrieved from client browser cookie (__Host-oauth_state).
+    pub cookie_state: Option<String>,
     /// Client IP address.
     pub ip_address: IpAddr,
     /// Client User-Agent header.

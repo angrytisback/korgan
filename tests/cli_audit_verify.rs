@@ -238,20 +238,30 @@ impl AuditLogRepository for CliTestAuditRepo {
             .lock()
             .map_err(|e| PortError::database(e.to_string()))?;
         let mut list = logs.clone();
-        list.sort_by_key(|a| a.created_at);
+        list.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         Ok(list)
     }
 
     async fn append_and_chain(&self, entry: &mut AuditLog) -> Result<(), PortError> {
-        let prev = {
-            let logs = self
-                .logs
-                .lock()
-                .map_err(|e| PortError::database(e.to_string()))?;
-            logs.last().and_then(|l| l.entry_hash.clone())
+        let mut logs = self
+            .logs
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        let prev = logs.last().and_then(|l| l.entry_hash.clone());
+        let now = Utc::now();
+        let monotonic_created_at = match logs.last() {
+            Some(last) if now <= last.created_at => {
+                last.created_at + chrono::Duration::microseconds(1)
+            }
+            _ => now,
         };
-        entry.chain_to(prev.as_deref());
-        self.append(entry).await
+        entry.chain_with_timestamp(prev.as_deref(), monotonic_created_at);
+        logs.push(entry.clone());
+        Ok(())
     }
 
     async fn count_all(&self) -> Result<u64, PortError> {
@@ -602,6 +612,89 @@ async fn test_audit_log_cryptographic_verification_and_tamper_detection() -> Tes
         }
         other => {
             return Err(format!("Expected CliError::AuditCorrupted, got {:?}", other).into());
+        }
+    }
+
+    Ok(())
+}
+
+struct DirectEntriesAuditRepo {
+    entries: Vec<AuditLog>,
+}
+
+#[async_trait]
+impl AuditLogRepository for DirectEntriesAuditRepo {
+    async fn append(&self, _entry: &AuditLog) -> Result<(), PortError> {
+        Ok(())
+    }
+    async fn list_by_user_id(
+        &self,
+        _uid: &UserId,
+        _limit: u32,
+        _offset: u64,
+    ) -> Result<Vec<AuditLog>, PortError> {
+        Ok(Vec::new())
+    }
+    async fn list_recent(&self, _limit: u32, _offset: u64) -> Result<Vec<AuditLog>, PortError> {
+        Ok(Vec::new())
+    }
+    async fn list_all_chronological(&self) -> Result<Vec<AuditLog>, PortError> {
+        Ok(self.entries.clone())
+    }
+    async fn count_all(&self) -> Result<u64, PortError> {
+        Ok(self.entries.len() as u64)
+    }
+}
+
+#[tokio::test]
+async fn test_audit_chain_verification_detects_monotonicity_violation() -> TestResult {
+    let req_id = RequestId::new();
+    let base_time = Utc::now();
+
+    let mut entry1 = AuditLog::new(
+        None,
+        None,
+        None,
+        req_id,
+        "event_1",
+        AuditEventStatus::Success,
+        serde_json::json!({"action": "first"}),
+    );
+    entry1.chain_with_timestamp(None, base_time);
+
+    let mut entry2 = AuditLog::new(
+        None,
+        None,
+        None,
+        req_id,
+        "event_2",
+        AuditEventStatus::Success,
+        serde_json::json!({"action": "second"}),
+    );
+    // Violate monotonicity: entry2 has earlier timestamp than entry1
+    let backward_time = base_time - chrono::Duration::seconds(5);
+    entry2.chain_with_timestamp(entry1.entry_hash.as_deref(), backward_time);
+
+    let repo = Arc::new(DirectEntriesAuditRepo {
+        entries: vec![entry1, entry2.clone()],
+    });
+    let use_case = korgan::application::use_cases::admin::VerifyAuditChainUseCase::new(repo);
+    let res = use_case.execute().await?;
+
+    match res {
+        AuditVerificationResult::Corrupted(broken) => {
+            assert_eq!(broken.record_index, 1);
+            assert_eq!(broken.log_id, entry2.id.to_string());
+            assert!(
+                broken.reason.contains("Monotonic timestamp violation"),
+                "expected monotonic violation reason, got: {}",
+                broken.reason
+            );
+        }
+        AuditVerificationResult::Valid { .. } => {
+            return Err(
+                "Expected verification to fail due to monotonic timestamp violation".into(),
+            );
         }
     }
 
