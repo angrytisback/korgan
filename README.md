@@ -1,13 +1,11 @@
 <div align="center">
 
-![Korgan Logo](docs/assets/logo.png)
-
 # Korgan
 
 **Stateful Control with Stateless Speed. The ultra-lightweight IAM written in Rust.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/angrytisback/korgan/ci.yml?branch=main&label=CI%2FCD&logo=github)](https://github.com/angrytisback/korgan/actions)
-[![Docker Pulls](https://img.shields.io/docker/pulls/angrytisback/korgan?logo=docker&logoColor=white)](https://github.com/angrytisback/korgan/pkgs/container/korgan)
+[![GHCR Container](https://img.shields.io/badge/ghcr.io-angrytisback%2Fkorgan-blue?logo=docker&logoColor=white)](https://github.com/angrytisback/korgan/pkgs/container/korgan)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Rust Version](https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org)
 
