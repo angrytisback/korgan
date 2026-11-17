@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::application::workers::events::AppEvent;
 use crate::ports::repositories::{AuditLogRepository, SessionRepository, UserRepository};
@@ -49,12 +49,25 @@ impl EventWorker {
     pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
         info!("event worker background task started");
 
+        // When every stop sender is gone (embedded use via `build_app`) the stop
+        // branch is disabled instead of polled: a closed `watch` channel resolves
+        // immediately and would otherwise turn this loop into a busy spin. The
+        // worker then runs until the event bus is closed.
+        let mut stop_channel_open = true;
+
         loop {
             tokio::select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        info!("event worker received shutdown signal; stopping");
-                        break;
+                changed = shutdown.changed(), if stop_channel_open => {
+                    match changed {
+                        Ok(()) if *shutdown.borrow() => {
+                            info!("event worker received shutdown signal; stopping");
+                            break;
+                        }
+                        Ok(()) => {}
+                        Err(_) => {
+                            stop_channel_open = false;
+                            debug!("event worker stop channel closed; running until the event bus closes");
+                        }
                     }
                 }
                 maybe_event = self.receiver.recv() => {
@@ -185,8 +198,9 @@ impl SessionPurgeWorker {
 
         loop {
             tokio::select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
+                changed = shutdown.changed() => {
+                    // A closed channel means the owner is gone: stop as well.
+                    if changed.is_err() || *shutdown.borrow() {
                         info!("session purge worker received shutdown signal; stopping");
                         break;
                     }
@@ -258,8 +272,9 @@ impl RetentionGcWorker {
 
         loop {
             tokio::select! {
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
+                changed = shutdown.changed() => {
+                    // A closed channel means the owner is gone: stop as well.
+                    if changed.is_err() || *shutdown.borrow() {
                         info!("retention GC worker received shutdown signal; stopping");
                         break;
                     }
