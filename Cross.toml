@@ -1,0 +1,15 @@
+# Cross-compilation / emulated testing for aarch64 with `cross`
+# (https://github.com/cross-rs/cross); needs Docker, no host emulation setup:
+#   cross test  --locked --target aarch64-unknown-linux-gnu   # runs under qemu-user
+#   cross build --locked --release --target aarch64-unknown-linux-gnu
+# webauthn-rs pulls in openssl-sys, so the target OpenSSL headers are required.
+[target.aarch64-unknown-linux-gnu]
+# The default image of old cross releases is too old for current host-built build scripts.
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update && apt-get install --assume-yes pkg-config libssl-dev:$CROSS_DEB_ARCH",
+]
+
+[build.env]
+passthrough = ["SQLX_OFFLINE"]
