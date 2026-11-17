@@ -80,23 +80,26 @@ impl BootstrapSuperadminUseCase {
         user.email_verified_at = Some(now);
         user.created_at = now;
         user.updated_at = now;
-
-        self.user_repo.create(&user).await?;
-
         self.event_bus
-            .record_audit(AuditLog::new(
-                Some(user.id),
-                None,
-                Some("korgan-cli-bootstrap".to_string()),
-                RequestId::new(),
-                "bootstrap_superadmin",
-                AuditEventStatus::Success,
-                serde_json::json!({
-                    "email": user.email.as_str(),
-                    "role": user.role.as_str(),
-                }),
-            ))
-            .await;
+            .audited(
+                async {
+                    self.user_repo.create(&user).await?;
+                    Ok::<(), AppError>(())
+                },
+                AuditLog::new(
+                    Some(user.id),
+                    None,
+                    Some("korgan-cli-bootstrap".to_string()),
+                    RequestId::new(),
+                    "bootstrap_superadmin",
+                    AuditEventStatus::Success,
+                    serde_json::json!({
+                        "email": user.email.as_str(),
+                        "role": user.role.as_str(),
+                    }),
+                ),
+            )
+            .await?;
 
         Ok(user)
     }

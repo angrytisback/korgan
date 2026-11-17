@@ -137,17 +137,37 @@ impl ChangePasswordUseCase {
         }
 
         let new_hash = self.password_hasher.hash_password(&raw_new).await?;
-        self.user_repo
-            .update_password(&user.id, &new_hash, self.history_depth)
-            .await?;
+        let audit = AuditLog::new(
+            Some(user.id),
+            cmd.ip_address,
+            cmd.user_agent,
+            cmd.request_id,
+            audit_events::PASSWORD_CHANGED,
+            AuditEventStatus::Success,
+            serde_json::json!({}),
+        );
 
-        // Invalidate other sessions and sync to Redis blacklist
+        // The password change, session revocation and audit entry commit in ONE
+        // transaction; the Redis blacklist sync follows.
         let revoked_ids = self
-            .session_repo
-            .revoke_all_user_sessions(
-                &user.id,
-                cmd.current_session_id.as_ref(),
-                "password_changed",
+            .event_bus
+            .audited(
+                async {
+                    self.user_repo
+                        .update_password(&user.id, &new_hash, self.history_depth)
+                        .await?;
+
+                    let ids = self
+                        .session_repo
+                        .revoke_all_user_sessions(
+                            &user.id,
+                            cmd.current_session_id.as_ref(),
+                            "password_changed",
+                        )
+                        .await?;
+                    Ok::<_, AppError>(ids)
+                },
+                audit,
             )
             .await?;
 
@@ -176,18 +196,6 @@ impl ChangePasswordUseCase {
             }
         })
         .await?;
-
-        self.event_bus
-            .record_audit(AuditLog::new(
-                Some(user.id),
-                cmd.ip_address,
-                cmd.user_agent,
-                cmd.request_id,
-                audit_events::PASSWORD_CHANGED,
-                AuditEventStatus::Success,
-                serde_json::json!({}),
-            ))
-            .await;
 
         Ok(())
     }

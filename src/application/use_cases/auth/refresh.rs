@@ -82,9 +82,33 @@ impl RefreshSessionUseCase {
         session: &Session,
         cmd: &RefreshTokenCommand,
     ) -> Result<AuthTokensResult, AppError> {
+        let audit = AuditLog::new(
+            Some(session.user_id),
+            Some(cmd.ip_address),
+            cmd.user_agent.clone(),
+            cmd.request_id,
+            audit_events::TOKEN_REUSE_DETECTED,
+            AuditEventStatus::Blocked,
+            serde_json::json!({
+                "session_id": session.id.to_string(),
+                "token_family_id": session.token_family_id.to_string(),
+            }),
+        );
+
+        // Revoking the token family and its audit entry commit in ONE
+        // transaction; the Redis blacklist sync follows.
         let revoked_ids = self
-            .session_repo
-            .revoke_family(&session.token_family_id, "token_reuse_detected")
+            .event_bus
+            .audited(
+                async {
+                    let ids = self
+                        .session_repo
+                        .revoke_family(&session.token_family_id, "token_reuse_detected")
+                        .await?;
+                    Ok::<_, AppError>(ids)
+                },
+                audit,
+            )
             .await?;
 
         let token_store = self.token_store.clone();
@@ -113,21 +137,6 @@ impl RefreshSessionUseCase {
             }
         })
         .await?;
-
-        self.event_bus
-            .record_audit(AuditLog::new(
-                Some(session.user_id),
-                Some(cmd.ip_address),
-                cmd.user_agent.clone(),
-                cmd.request_id,
-                audit_events::TOKEN_REUSE_DETECTED,
-                AuditEventStatus::Blocked,
-                serde_json::json!({
-                    "session_id": session.id.to_string(),
-                    "token_family_id": session.token_family_id.to_string(),
-                }),
-            ))
-            .await;
 
         metrics::counter!("korgan_token_reuse_events_total").increment(1);
         Err(AppError::TokenReuseDetected)

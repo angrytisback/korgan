@@ -84,19 +84,23 @@ impl VerifyEmailUseCase {
 
         let now = Utc::now();
         user.verify_email(now);
-        self.user_repo.update(&user).await?;
-
         self.event_bus
-            .record_audit(AuditLog::new(
-                Some(user.id),
-                cmd.ip_address,
-                cmd.user_agent,
-                cmd.request_id,
-                audit_events::EMAIL_VERIFIED,
-                AuditEventStatus::Success,
-                serde_json::json!({ "email": user.email.as_str() }),
-            ))
-            .await;
+            .audited(
+                async {
+                    self.user_repo.update(&user).await?;
+                    Ok::<(), AppError>(())
+                },
+                AuditLog::new(
+                    Some(user.id),
+                    cmd.ip_address,
+                    cmd.user_agent,
+                    cmd.request_id,
+                    audit_events::EMAIL_VERIFIED,
+                    AuditEventStatus::Success,
+                    serde_json::json!({ "email": user.email.as_str() }),
+                ),
+            )
+            .await?;
 
         Ok(())
     }

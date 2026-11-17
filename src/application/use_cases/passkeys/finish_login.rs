@@ -198,10 +198,6 @@ impl FinishPasskeyLoginUseCase {
         let updated_json = serde_json::to_value(&updated_passkey)
             .map_err(|e| AppError::internal("failed to serialize updated passkey credential", e))?;
         passkey_entity.update_passkey_json(updated_json.clone());
-        self.passkey_repo
-            .update_credential_state(&passkey_entity.id, &updated_json, now)
-            .await?;
-
         // 5. Create Session & Tokens
         let (raw_refresh_token, refresh_token_hash) = generate_opaque_token();
         let chrono_refresh_ttl = chrono::Duration::from_std(self.refresh_token_ttl)
@@ -216,13 +212,41 @@ impl FinishPasskeyLoginUseCase {
             chrono_refresh_ttl,
         )
         .with_amr(vec!["passkey".to_string()]);
-        self.session_repo
-            .create(&session)
-            .await
-            .map_err(|e| match e {
-                crate::ports::PortError::Conflict { .. } => AppError::Forbidden,
-                other => AppError::from(other),
-            })?;
+
+        let audit = AuditLog::new(
+            Some(user.id),
+            Some(cmd.ip_address),
+            cmd.user_agent,
+            cmd.request_id,
+            audit_events::PASSKEY_LOGIN,
+            AuditEventStatus::Success,
+            serde_json::json!({
+                "passkey_id": passkey_entity.id,
+                "session_id": session.id,
+            }),
+        );
+
+        // Credential counter update, session creation and the audit entry
+        // commit together: no session without its audit record, and no
+        // consumed credential state without a session.
+        self.event_bus
+            .audited(
+                async {
+                    self.passkey_repo
+                        .update_credential_state(&passkey_entity.id, &updated_json, now)
+                        .await?;
+                    self.session_repo
+                        .create(&session)
+                        .await
+                        .map_err(|e| match e {
+                            crate::ports::PortError::Conflict { .. } => AppError::Forbidden,
+                            other => AppError::from(other),
+                        })?;
+                    Ok::<(), AppError>(())
+                },
+                audit,
+            )
+            .await?;
 
         let expires_in = self.access_token_ttl.as_secs() as i64;
         let claims = AccessTokenClaims {
@@ -238,21 +262,6 @@ impl FinishPasskeyLoginUseCase {
         };
 
         let access_token = self.token_signer.sign_access_token(&claims)?;
-
-        // 6. Audit Logging
-        let audit = AuditLog::new(
-            Some(user.id),
-            Some(cmd.ip_address),
-            cmd.user_agent,
-            cmd.request_id,
-            audit_events::PASSKEY_LOGIN,
-            AuditEventStatus::Success,
-            serde_json::json!({
-                "passkey_id": passkey_entity.id,
-                "session_id": session.id,
-            }),
-        );
-        self.event_bus.record_audit(audit).await;
 
         Ok(AuthTokensResult {
             access_token,

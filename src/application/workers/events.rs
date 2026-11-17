@@ -154,9 +154,24 @@ impl EventBus {
         T: Send,
         W: std::future::Future<Output = Result<T, AppError>> + Send,
     {
+        self.audited_with(work, move |_| audit).await
+    }
+
+    /// Like [`audited`](Self::audited), but builds the audit entry from the
+    /// result of `work` (for entries whose metadata depends on it).
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of `work`, or an error if the transaction fails.
+    pub async fn audited_with<T, W, F>(&self, work: W, build_audit: F) -> Result<T, AppError>
+    where
+        T: Send,
+        W: std::future::Future<Output = Result<T, AppError>> + Send,
+        F: FnOnce(&T) -> AuditLog + Send,
+    {
         let (Some(unit_of_work), Some(outbox)) = (&self.unit_of_work, &self.audit_outbox) else {
             let value = work.await?;
-            self.record_audit(audit).await;
+            self.record_audit(build_audit(&value)).await;
             return Ok(value);
         };
 
@@ -166,6 +181,7 @@ impl EventBus {
         unit_of_work
             .run(Box::pin(async move {
                 let value = work.await?;
+                let audit = build_audit(&value);
                 outbox.enqueue(&audit).await.map_err(AppError::from)?;
                 *target = Some(value);
                 Ok(())

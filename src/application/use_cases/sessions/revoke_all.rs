@@ -49,12 +49,36 @@ impl RevokeAllSessionsUseCase {
     pub async fn execute(&self, cmd: RevokeAllSessionsCommand) -> Result<(), AppError> {
         cmd.validate()?;
 
+        let audit = AuditLog::new(
+            Some(cmd.user_id),
+            cmd.ip_address,
+            cmd.user_agent,
+            cmd.request_id,
+            audit_events::SESSION_REVOKED,
+            AuditEventStatus::Success,
+            serde_json::json!({
+                "revoked_all": true,
+                "exempt_session": cmd.except_session_id.map(|s| s.to_string()),
+            }),
+        );
+
+        // Revocation and its audit entry commit in ONE transaction; the Redis
+        // blacklist sync follows.
         let revoked_ids = self
-            .session_repo
-            .revoke_all_user_sessions(
-                &cmd.user_id,
-                cmd.except_session_id.as_ref(),
-                "user_revocation",
+            .event_bus
+            .audited(
+                async {
+                    Ok::<_, AppError>(
+                        self.session_repo
+                            .revoke_all_user_sessions(
+                                &cmd.user_id,
+                                cmd.except_session_id.as_ref(),
+                                "user_revocation",
+                            )
+                            .await?,
+                    )
+                },
+                audit,
             )
             .await?;
 
@@ -83,21 +107,6 @@ impl RevokeAllSessionsUseCase {
             }
         })
         .await?;
-
-        self.event_bus
-            .record_audit(AuditLog::new(
-                Some(cmd.user_id),
-                cmd.ip_address,
-                cmd.user_agent,
-                cmd.request_id,
-                audit_events::SESSION_REVOKED,
-                AuditEventStatus::Success,
-                serde_json::json!({
-                    "revoked_all": true,
-                    "exempt_session": cmd.except_session_id.map(|s| s.to_string()),
-                }),
-            ))
-            .await;
 
         Ok(())
     }

@@ -112,22 +112,31 @@ impl EnableTotpUseCase {
 
         let mut mfa = UserMfa::new(cmd.user_id, ciphertext, nonce, hashes);
         mfa.verify(now);
-        self.user_repo.enable_mfa(&mfa).await.map_err(|e| match e {
-            crate::ports::errors::PortError::NotFound { .. } => AppError::Unauthenticated,
-            other => AppError::from(other),
-        })?;
+        let audit = AuditLog::new(
+            Some(cmd.user_id),
+            cmd.ip_address,
+            cmd.user_agent,
+            cmd.request_id,
+            audit_events::MFA_ENABLED,
+            AuditEventStatus::Success,
+            serde_json::json!({ "mfa_type": "totp" }),
+        );
 
+        // Enabling MFA and its audit entry commit together.
         self.event_bus
-            .record_audit(AuditLog::new(
-                Some(cmd.user_id),
-                cmd.ip_address,
-                cmd.user_agent,
-                cmd.request_id,
-                audit_events::MFA_ENABLED,
-                AuditEventStatus::Success,
-                serde_json::json!({ "mfa_type": "totp" }),
-            ))
-            .await;
+            .audited(
+                async {
+                    self.user_repo.enable_mfa(&mfa).await.map_err(|e| match e {
+                        crate::ports::errors::PortError::NotFound { .. } => {
+                            AppError::Unauthenticated
+                        }
+                        other => AppError::from(other),
+                    })?;
+                    Ok::<(), AppError>(())
+                },
+                audit,
+            )
+            .await?;
 
         Ok(TotpEnabledResult {
             backup_codes: plaintexts,

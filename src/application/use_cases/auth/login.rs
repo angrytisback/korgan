@@ -245,32 +245,40 @@ impl LoginUseCase {
             let lockout_chrono = chrono::Duration::from_std(self.config.lockout_duration)
                 .map_err(|e| AppError::internal("invalid lockout duration configuration", e))?;
             let lockout_until = now + lockout_chrono;
-            let (failed_attempts, locked_until) = self
-                .user_repo
-                .record_failed_login_atomic(
-                    &user.id,
-                    self.config.max_failed_attempts,
-                    lockout_until,
-                    now,
+            // The failed-attempt counter (and lockout) and its audit entry commit
+            // in ONE transaction.
+            let _ = self
+                .event_bus
+                .audited_with(
+                    async {
+                        let outcome = self
+                            .user_repo
+                            .record_failed_login_atomic(
+                                &user.id,
+                                self.config.max_failed_attempts,
+                                lockout_until,
+                                now,
+                            )
+                            .await?;
+                        Ok::<_, AppError>(outcome)
+                    },
+                    |(failed_attempts, locked_until)| {
+                        let is_locked = locked_until.is_some_and(|until| until > now);
+                        AuditLog::new(
+                            Some(user.id),
+                            Some(cmd.ip_address),
+                            cmd.user_agent.clone(),
+                            cmd.request_id,
+                            audit_events::LOGIN_FAILED,
+                            AuditEventStatus::Failure,
+                            serde_json::json!({
+                                "failed_attempts": failed_attempts,
+                                "locked": is_locked
+                            }),
+                        )
+                    },
                 )
                 .await?;
-
-            let is_locked = locked_until.is_some_and(|until| until > now);
-
-            self.event_bus
-                .record_audit(AuditLog::new(
-                    Some(user.id),
-                    Some(cmd.ip_address),
-                    cmd.user_agent,
-                    cmd.request_id,
-                    audit_events::LOGIN_FAILED,
-                    AuditEventStatus::Failure,
-                    serde_json::json!({
-                        "failed_attempts": failed_attempts,
-                        "locked": is_locked
-                    }),
-                ))
-                .await;
 
             return Err(AppError::InvalidCredentials);
         }
@@ -346,19 +354,37 @@ impl LoginUseCase {
         )
         .with_amr(vec!["pwd".to_string()]);
 
-        // Guard against orphan session creation if user was banned/locked concurrently:
-        // Session creation checks active status directly in database.
-        self.session_repo
-            .create(&session)
-            .await
-            .map_err(|e| match e {
-                crate::ports::PortError::Conflict { .. } => AppError::Forbidden,
-                other => AppError::from(other),
-            })?;
+        let audit = AuditLog::new(
+            Some(user.id),
+            Some(cmd.ip_address),
+            cmd.user_agent,
+            cmd.request_id,
+            audit_events::LOGIN_SUCCESS,
+            AuditEventStatus::Success,
+            serde_json::json!({ "session_id": session.id.to_string() }),
+        );
 
-        // Credentials valid & session created: atomically reset failed login attempts
-        // without mutating or overwriting any other columns (such as account status).
-        self.user_repo.reset_failed_logins(&user.id, now).await?;
+        // Session creation (which re-checks the account status in the database),
+        // the failed-attempt reset and the login audit entry commit in ONE
+        // transaction; resetting the Redis rate limiter follows.
+        self.event_bus
+            .audited(
+                async {
+                    self.session_repo
+                        .create(&session)
+                        .await
+                        .map_err(|e| match e {
+                            crate::ports::PortError::Conflict { .. } => AppError::Forbidden,
+                            other => AppError::from(other),
+                        })?;
+                    // Atomically reset failed login attempts without mutating any
+                    // other column (such as account status).
+                    self.user_repo.reset_failed_logins(&user.id, now).await?;
+                    Ok::<(), AppError>(())
+                },
+                audit,
+            )
+            .await?;
         let _ = self.rate_limiter.reset(&rate_limit_key).await;
 
         let exp = now.timestamp() + self.config.access_token_ttl.as_secs() as i64;
@@ -378,18 +404,6 @@ impl LoginUseCase {
         };
 
         let access_token = self.token_signer.sign_access_token(&claims)?;
-
-        self.event_bus
-            .record_audit(AuditLog::new(
-                Some(user.id),
-                Some(cmd.ip_address),
-                cmd.user_agent,
-                cmd.request_id,
-                audit_events::LOGIN_SUCCESS,
-                AuditEventStatus::Success,
-                serde_json::json!({ "session_id": session.id.to_string() }),
-            ))
-            .await;
 
         Ok(LoginOutcome::Authenticated(AuthTokensResult {
             access_token,
