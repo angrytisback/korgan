@@ -215,7 +215,7 @@ On `SIGTERM`/`SIGINT` Korgan stops accepting connections, waits up to `server.sh
 With `database.run_migrations = true` (the default) the SQL migrations embedded in the binary are applied at startup, before the server or any CLI command touches the database. `sqlx` holds a PostgreSQL advisory lock while migrating, so several replicas starting together serialize safely. The database user needs DDL privileges for this; if migrations are applied by a separate, privileged release step, set `database.run_migrations = false` and run `cargo sqlx migrate run` instead. Modifying an already-applied migration file makes startup fail with a checksum error (intended).
 
 ### Build requirements
-The test suite also runs on aarch64: `make test-arm64` (uses `cross`, Docker and qemu-user inside the container, configured in `Cross.toml`; no host emulation setup). It verifies the glibc target `aarch64-unknown-linux-gnu`; the static musl image for arm64 is built by the Dockerfile on a native arm64 builder (`release.yml`).
+The test suite also runs on aarch64: `make test-arm64` (uses `cross`, Docker and qemu-user inside the container, configured in `Cross.toml`; no host emulation setup). It verifies the glibc target `aarch64-unknown-linux-gnu`. `make build-arm64-musl` builds the static `aarch64-unknown-linux-musl` release binary the same way (a target OpenSSL is compiled inside the cross image first); it was verified to be a static aarch64 ELF that runs under qemu-user. The release workflow builds the same target natively on an arm64 runner.
 
 Minimum supported Rust version: **1.94** (`rust-version` in `Cargo.toml`, enforced by the CI `msrv` job).
 
