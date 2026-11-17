@@ -274,53 +274,92 @@ impl RetentionGcWorker {
     }
 
     /// Runs periodic purging until shutdown is requested.
-    pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
+    ///
+    /// A purge step that is still waiting (for example on a database
+    /// connection) is cancelled when shutdown is requested.
+    pub async fn run(self, shutdown: watch::Receiver<bool>) {
         info!(
             interval_secs = self.interval.as_secs(),
             batch_size = self.batch_size,
             "retention GC worker started"
         );
+        let this = &self;
+        run_periodic("retention GC worker", self.interval, shutdown, || {
+            this.purge_once()
+        })
+        .await;
+    }
 
-        let mut ticker = tokio::time::interval(self.interval);
-
-        loop {
-            tokio::select! {
-                changed = shutdown.changed() => {
-                    // A closed channel means the owner is gone: stop as well.
-                    if changed.is_err() || *shutdown.borrow() {
-                        info!("retention GC worker received shutdown signal; stopping");
-                        break;
-                    }
+    /// Purges expired sessions and stale unverified accounts once.
+    async fn purge_once(&self) {
+        // 1. Purge expired sessions
+        match self.session_repo.purge_expired(self.batch_size).await {
+            Ok(count) => {
+                if count > 0 {
+                    info!(
+                        purged_sessions = count,
+                        "retention GC purged expired sessions"
+                    );
                 }
-                _ = ticker.tick() => {
-                    // 1. Purge expired sessions
-                    match self.session_repo.purge_expired(self.batch_size).await {
-                        Ok(count) => {
-                            if count > 0 {
-                                info!(purged_sessions = count, "retention GC purged expired sessions");
-                            }
-                        }
-                        Err(e) => {
-                            error!(error = %e, "retention GC failed to purge expired sessions");
-                        }
-                    }
+            }
+            Err(e) => {
+                error!(error = %e, "retention GC failed to purge expired sessions");
+            }
+        }
 
-                    // 2. Purge stale unverified user accounts
-                    let cutoff_chrono = match chrono::Duration::from_std(self.unverified_retention) {
-                        Ok(d) => d,
-                        Err(_) => chrono::Duration::days(7),
-                    };
-                    let cutoff = Utc::now() - cutoff_chrono;
+        // 2. Purge stale unverified user accounts
+        let cutoff_chrono = match chrono::Duration::from_std(self.unverified_retention) {
+            Ok(d) => d,
+            Err(_) => chrono::Duration::days(7),
+        };
+        let cutoff = Utc::now() - cutoff_chrono;
 
-                    match self.user_repo.purge_expired_unverified(cutoff, self.batch_size).await {
-                        Ok(count) => {
-                            if count > 0 {
-                                info!(purged_unverified_users = count, "retention GC purged unverified users");
-                            }
-                        }
-                        Err(e) => {
-                            error!(error = %e, "retention GC failed to purge expired unverified users");
-                        }
+        match self
+            .user_repo
+            .purge_expired_unverified(cutoff, self.batch_size)
+            .await
+        {
+            Ok(count) => {
+                if count > 0 {
+                    info!(
+                        purged_unverified_users = count,
+                        "retention GC purged unverified users"
+                    );
+                }
+            }
+            Err(e) => {
+                error!(error = %e, "retention GC failed to purge expired unverified users");
+            }
+        }
+    }
+}
+
+/// Runs `tick` every `interval` until `shutdown` fires (or its sender is gone).
+///
+/// The in-flight tick is dropped on shutdown, so a hanging dependency can
+/// never hold up process termination; the next start simply repeats the work.
+async fn run_periodic<F, Fut>(
+    name: &'static str,
+    interval: Duration,
+    mut shutdown: watch::Receiver<bool>,
+    mut tick: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut ticker = tokio::time::interval(interval);
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                info!(worker = name, "received shutdown signal; stopping");
+                break;
+            }
+            _ = ticker.tick() => {
+                tokio::select! {
+                    () = tick() => {}
+                    _ = shutdown.changed() => {
+                        info!(worker = name, "shutdown requested during a tick; cancelling it");
+                        break;
                     }
                 }
             }
@@ -343,7 +382,25 @@ pub async fn join_worker(name: &'static str, handle: tokio::task::JoinHandle<()>
 
 #[cfg(test)]
 mod tests {
-    use super::join_worker;
+    use super::{join_worker, run_periodic};
+    use std::time::Duration;
+    use tokio::sync::watch;
+
+    /// A tick that hangs (e.g. DB acquire wait) must not delay shutdown.
+    #[tokio::test]
+    async fn periodic_worker_stops_promptly_while_a_tick_is_hanging() {
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let handle = tokio::spawn(run_periodic(
+            "test",
+            Duration::from_millis(10),
+            stop_rx,
+            || async { std::future::pending::<()>().await },
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(stop_tx.send(true).is_ok());
+        let stopped = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        assert!(stopped.is_ok(), "worker kept waiting on the hanging tick");
+    }
 
     #[tokio::test]
     async fn join_worker_reports_clean_exit() {
