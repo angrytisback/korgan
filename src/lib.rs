@@ -50,6 +50,15 @@ pub fn build_app(settings: Arc<Settings>) -> Result<Router, RouterError> {
     build_router(state)
 }
 
+/// Builds the router for the dedicated metrics listener
+/// (`server.metrics_addr`): `GET /metrics` only, no application state.
+pub fn build_metrics_router() -> Router {
+    Router::new().route(
+        "/metrics",
+        axum::routing::get(adapters::inbound::http::handlers::metrics::metrics),
+    )
+}
+
 /// Serves `app` on `listener` until `shutdown` resolves, then drains in-flight
 /// requests for at most `grace` before returning.
 ///
