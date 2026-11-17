@@ -21,7 +21,9 @@ use super::error::{ApiError, ErrorKind, problem_details_middleware};
 use super::handlers::{
     admin, auth, fallback, health, jwks, metrics, mfa, oauth, passkeys, password, sessions, users,
 };
-use super::middleware::rate_limit::rate_limit_middleware;
+use super::middleware::rate_limit::{
+    EndpointLimit, endpoint_rate_limit_middleware, rate_limit_middleware,
+};
 use super::middleware::request_id::{X_REQUEST_ID, request_id_middleware};
 use super::middleware::security_headers::security_headers_middleware;
 use super::openapi;
@@ -87,9 +89,21 @@ pub fn build_router(state: AppState) -> Result<Router, RouterError> {
 
     let api_v1 = Router::new()
         // Authentication
-        .route("/auth/register", post(auth::register))
+        .route(
+            "/auth/register",
+            post(auth::register).route_layer(from_fn_with_state(
+                (state.clone(), EndpointLimit::Register),
+                endpoint_rate_limit_middleware,
+            )),
+        )
         .route("/auth/login", post(auth::login))
-        .route("/auth/mfa/verify", post(auth::verify_mfa))
+        .route(
+            "/auth/mfa/verify",
+            post(auth::verify_mfa).route_layer(from_fn_with_state(
+                (state.clone(), EndpointLimit::MfaVerify),
+                endpoint_rate_limit_middleware,
+            )),
+        )
         .route("/auth/refresh", post(auth::refresh))
         .route("/auth/verify-email", post(auth::verify_email))
         .route("/auth/logout", post(auth::logout))
@@ -110,7 +124,13 @@ pub fn build_router(state: AppState) -> Result<Router, RouterError> {
         .route("/auth/passkeys/login/start", post(passkeys::login_start))
         .route("/auth/passkeys/login/finish", post(passkeys::login_finish))
         // Password Management
-        .route("/password/forgot", post(password::forgot))
+        .route(
+            "/password/forgot",
+            post(password::forgot).route_layer(from_fn_with_state(
+                (state.clone(), EndpointLimit::ForgotPassword),
+                endpoint_rate_limit_middleware,
+            )),
+        )
         .route("/password/reset", post(password::reset))
         .route("/password/change", post(password::change))
         // Multi-Factor Authentication
