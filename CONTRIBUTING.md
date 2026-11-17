@@ -71,7 +71,7 @@ When modifying or adding database queries:
 
 ## 4. Local Development & Verification Workflow
 
-Before submitting a Pull Request, run the full verification gate locally. `make check` runs steps 1, 2, 3 and 5 below plus the rustdoc gate (`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`); `make audit` runs step 4 and `make msrv` verifies the declared minimum Rust version (1.94):
+Before submitting a Pull Request, run the full verification gate locally. `make check` runs steps 1, 2, 3 and 5 below plus the rustdoc gate (`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`); `make audit` runs step 4, `make msrv` verifies the declared minimum Rust version (1.94) and `make test-db` runs the real-PostgreSQL tests (set `KORGAN_TEST_DATABASE_URL`, see `tests/real_db.rs`):
 
 ```bash
 # 1. Check code formatting

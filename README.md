@@ -342,8 +342,9 @@ sed -i "s|KORGAN__CRYPTO__AES_MASTER_KEY=.*|KORGAN__CRYPTO__AES_MASTER_KEY=$AES_
 # Start PostgreSQL 17, Valkey/Redis 8, and Mailpit
 docker compose up -d
 
-# Run database migrations
-cargo sqlx migrate run
+# Database migrations are applied automatically at startup
+# (database.run_migrations = true). To run them manually instead, set
+# KORGAN__DATABASE__RUN_MIGRATIONS=false and use: cargo sqlx migrate run
 
 # Bootstrap initial superadmin
 cargo run -- bootstrap --email superadmin@korgan.local --password "SuperAdminSecret123!"
