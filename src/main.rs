@@ -89,9 +89,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let gc_worker = RetentionGcWorker::new(
         state.session_repo.clone(),
         state.user_repo.clone(),
-        std::time::Duration::from_secs(3600),
-        500,
-        std::time::Duration::from_secs(86400 * 7),
+        settings.workers.gc_interval(),
+        settings.workers.gc_batch_size,
+        settings.workers.unverified_retention(),
     );
     let gc_handle = tokio::spawn(gc_worker.run(gc_stop_rx));
 
@@ -108,10 +108,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
     serve(listener, app, shutdown_signal(), grace).await?;
 
     // 2. Drain active shielded background tasks before terminating
-    let drain_timeout = std::time::Duration::from_secs(10);
-    tracing::info!("draining active shielded tasks (timeout: 10s)...");
+    let drain_timeout = settings.workers.shutdown_drain();
+    tracing::info!(
+        timeout_secs = drain_timeout.as_secs(),
+        "draining active shielded tasks"
+    );
     if !wait_for_shielded_tasks(drain_timeout).await {
-        tracing::warn!("shielded task draining timed out after 10s");
+        tracing::warn!(
+            timeout_secs = drain_timeout.as_secs(),
+            "shielded task draining timed out"
+        );
     } else {
         tracing::info!("all shielded tasks drained successfully");
     }
