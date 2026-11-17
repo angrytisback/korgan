@@ -71,7 +71,7 @@ When modifying or adding database queries:
 
 ## 4. Local Development & Verification Workflow
 
-Before submitting a Pull Request, run the full verification gate locally:
+Before submitting a Pull Request, run the full verification gate locally. `make check` runs steps 1, 2, 3 and 5 below plus the rustdoc gate (`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`); `make audit` runs step 4 and `make msrv` verifies the declared minimum Rust version (1.94):
 
 ```bash
 # 1. Check code formatting

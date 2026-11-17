@@ -175,3 +175,38 @@ systemctl start korgan.service
 curl -f http://127.0.0.1:8080/health/ready
 ```
 Recovery is complete.
+
+---
+
+## Runtime Tuning, Probes & Shutdown
+
+### Database and Redis pools
+All pool keys are honored at startup (`config/default.toml`, override with `KORGAN__<SECTION>__<KEY>`):
+- `database.max_connections`, `min_connections`, `acquire_timeout_secs`, `idle_timeout_secs`.
+- `database.statement_timeout_secs` (default `15`, `0` disables): server-side `statement_timeout` applied to every pooled connection. Raise it if you run legitimately longer queries.
+- `redis.pool_size` and `redis.connect_timeout_secs` (bounds waiting for, creating and recycling a connection). When Redis stalls, requests fail closed with `503` instead of queueing.
+
+### Background workers (`[workers]`)
+| Key | Default | Meaning |
+| :--- | :--- | :--- |
+| `event_queue_capacity` | `1024` | Bounded queue shared by audit and e-mail events |
+| `gc_interval_secs` | `3600` | Retention GC period |
+| `gc_batch_size` | `500` | Rows purged per GC step |
+| `unverified_retention_secs` | `604800` | Age after which never-verified accounts are purged |
+| `shutdown_drain_secs` | `10` | Time allowed for in-flight shielded tasks at shutdown |
+
+Audit events are persisted in order; e-mails are delivered on a bounded pool (8 concurrent, 256 pending, 15 s timeout each), so a slow mail server never delays audit persistence. If the queue is full an event is dropped and counted in `korgan_events_dropped_total{kind,reason}` — alert on any increase.
+
+### Health probes and metrics
+- `/health`, `/health/live`, `/health/ready` and `/metrics` bypass the Redis rate limiter. Liveness therefore stays `200` during a Redis outage; readiness returns `503` when PostgreSQL or Redis is unreachable.
+- `server.metrics_addr` (optional, e.g. `127.0.0.1:9100`): serve `/metrics` on a dedicated listener instead of the public one. When set, `/metrics` is no longer reachable on the public port.
+
+### Graceful shutdown
+On `SIGTERM`/`SIGINT` Korgan stops accepting connections, waits up to `server.shutdown_grace_secs` for in-flight requests, drains shielded tasks (`workers.shutdown_drain_secs`), then signals and joins the workers. Workers are drained even if the server itself failed, and a worker that terminated abnormally makes the process exit with a non-zero code.
+
+### Database migrations
+Migrations are **not** executed at startup. Apply them explicitly with `cargo sqlx migrate run` before starting a new version. The `database.run_migrations` key is currently accepted but has no effect (tracked in `.agent/reports/DECISIONS_NEEDED.md`).
+
+### Build requirements
+Minimum supported Rust version: **1.94** (`rust-version` in `Cargo.toml`, enforced by the CI `msrv` job).
+
