@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use sqlx::PgPool;
 
+use crate::adapters::outbound::postgres::db::DbConn;
 use crate::adapters::outbound::postgres::models::PasskeyRow;
 use crate::domain::entities::Passkey;
 use crate::domain::value_objects::{PasskeyId, UserId};
@@ -22,6 +23,13 @@ impl PostgresPasskeyRepository {
         Self { pool }
     }
 
+    /// Connection for one repository call (ambient transaction or pooled).
+    async fn conn(&self) -> Result<DbConn, PortError> {
+        DbConn::acquire(&self.pool)
+            .await
+            .map_err(|e| PortError::database(format!("failed to acquire connection: {e}")))
+    }
+
     fn map_sqlx_error(e: sqlx::Error, action: &'static str) -> PortError {
         if let Some(db_err) = e.as_database_error()
             && db_err.code().as_deref() == Some("23505")
@@ -38,6 +46,7 @@ impl PostgresPasskeyRepository {
 #[async_trait]
 impl PasskeyRepository for PostgresPasskeyRepository {
     async fn save(&self, passkey: &Passkey) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let id = passkey.id.as_uuid();
         let user_id = passkey.user_id.as_uuid();
 
@@ -66,7 +75,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
             passkey.last_used_at,
             passkey.created_at,
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "save passkey"))?;
 
@@ -77,6 +86,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
         &self,
         credential_id: &[u8],
     ) -> Result<Option<Passkey>, PortError> {
+        let mut conn = self.conn().await?;
         let row = sqlx::query_as!(
             PasskeyRow,
             r#"
@@ -93,7 +103,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
             "#,
             credential_id
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find passkey by credential id"))?;
 
@@ -101,6 +111,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
     }
 
     async fn find_by_id(&self, id: &PasskeyId) -> Result<Option<Passkey>, PortError> {
+        let mut conn = self.conn().await?;
         let id_uuid = id.as_uuid();
 
         let row = sqlx::query_as!(
@@ -119,7 +130,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
             "#,
             id_uuid
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find passkey by id"))?;
 
@@ -127,6 +138,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
     }
 
     async fn list_by_user_id(&self, user_id: &UserId) -> Result<Vec<Passkey>, PortError> {
+        let mut conn = self.conn().await?;
         let user_id_uuid = user_id.as_uuid();
 
         let rows = sqlx::query_as!(
@@ -146,7 +158,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
             "#,
             user_id_uuid
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "list passkeys by user id"))?;
 
@@ -154,6 +166,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
     }
 
     async fn delete_by_id(&self, id: &PasskeyId) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let id_uuid = id.as_uuid();
 
         sqlx::query!(
@@ -163,7 +176,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
             "#,
             id_uuid
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "delete passkey by id"))?;
 
@@ -175,6 +188,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
         id: &PasskeyId,
         user_id: &UserId,
     ) -> Result<bool, PortError> {
+        let mut conn = self.conn().await?;
         let id_uuid = id.as_uuid();
         let user_uuid = user_id.to_uuid();
 
@@ -186,7 +200,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
         )
         .bind(id_uuid)
         .bind(user_uuid)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "delete passkey by id and user id"))?;
 
@@ -199,6 +213,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
         passkey_json: &serde_json::Value,
         last_used_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let id_uuid = id.as_uuid();
 
         let result = sqlx::query(
@@ -215,7 +230,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
         .bind(id_uuid)
         .bind(passkey_json)
         .bind(last_used_at)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "update passkey credential state"))?;
 

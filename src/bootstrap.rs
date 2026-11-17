@@ -18,7 +18,7 @@ use crate::adapters::outbound::mail::{ConsoleMailProvider, ResendMailProvider, S
 use crate::adapters::outbound::oauth::{GithubOAuthAdapter, GoogleOAuthAdapter, NoopOAuthProvider};
 use crate::adapters::outbound::postgres::{
     PostgresAuditLogRepository, PostgresOAuthAccountRepository, PostgresPasskeyRepository,
-    PostgresSessionRepository, PostgresUserRepository,
+    PostgresSessionRepository, PostgresUnitOfWork, PostgresUserRepository,
 };
 use crate::adapters::outbound::redis::{RedisRateLimiter, RedisTokenStore};
 use crate::application::workers::{EventBus, EventWorker};
@@ -182,7 +182,9 @@ pub fn build_state(settings: Arc<Settings>) -> Result<(AppState, EventWorker), B
     // 6. Asynchronous Event Bus & Background Worker
     let audit_outbox = Arc::new(PostgresAuditLogRepository::new(pg_pool.clone()));
     let (event_bus, event_rx) = EventBus::new(settings.workers.event_queue_capacity);
-    let event_bus = event_bus.with_audit_outbox(audit_outbox.clone());
+    let event_bus = event_bus
+        .with_audit_outbox(audit_outbox.clone())
+        .with_unit_of_work(Arc::new(PostgresUnitOfWork::new(pg_pool.clone())));
     let event_worker = EventWorker::new(
         event_rx,
         mail_provider.clone(),

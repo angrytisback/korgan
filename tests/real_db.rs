@@ -325,3 +325,268 @@ async fn event_bus_and_worker_deliver_audit_events_end_to_end() -> TestResult {
 
     db.drop_db().await
 }
+
+// ---------------------------------------------------------------------------
+// Repositories on a real database + atomic "state change + audit" unit of work
+// ---------------------------------------------------------------------------
+
+use korgan::adapters::outbound::postgres::{
+    PostgresSessionRepository, PostgresUnitOfWork, PostgresUserRepository,
+};
+use korgan::application::error::AppError;
+use korgan::application::workers::EventBus;
+use korgan::domain::entities::{Session, User};
+use korgan::domain::value_objects::{EmailAddress, PasswordHash, UserId, Username};
+use korgan::ports::errors::PortError;
+use korgan::ports::repositories::{SessionRepository, UserRepository};
+
+const DUMMY_HASH: &str = "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgqlndPqnRMg";
+
+fn new_user(n: u32) -> Result<User, Box<dyn std::error::Error>> {
+    Ok(User::new(
+        EmailAddress::parse(format!("real{n}@example.com"))?,
+        Some(Username::new(format!("real{n}"))?),
+        PasswordHash::new(DUMMY_HASH)?,
+    ))
+}
+
+#[tokio::test]
+#[ignore = "needs KORGAN_TEST_DATABASE_URL"]
+async fn user_and_session_repositories_work_on_a_real_database() -> TestResult {
+    let db = TestDb::create().await?;
+    korgan::bootstrap::run_migrations(&db.pool).await?;
+    let users = PostgresUserRepository::new(db.pool.clone());
+    let sessions = PostgresSessionRepository::new(db.pool.clone());
+
+    let mut user = new_user(1)?;
+    users.create(&user).await?;
+    let found = users
+        .find_by_email(&user.email)
+        .await?
+        .ok_or("user missing")?;
+    assert_eq!(found.id, user.id);
+
+    user.status = korgan::domain::entities::AccountStatus::Active;
+    users.update(&user).await?;
+    assert!(users.find_by_id(&user.id).await?.is_some());
+
+    // Uses the repository's own transaction (savepoint-capable path).
+    users
+        .update_password(&user.id, &PasswordHash::new(DUMMY_HASH)?, 5)
+        .await?;
+
+    let session = Session::new(
+        user.id,
+        "hash".to_owned(),
+        std::net::IpAddr::from([127, 0, 0, 1]),
+        None,
+        None,
+        chrono::Duration::hours(1),
+    );
+    sessions.create(&session).await?;
+    assert!(sessions.find_by_id(&session.id).await?.is_some());
+
+    db.drop_db().await
+}
+
+/// Builds a bus whose audit entries commit together with the work it wraps.
+async fn atomic_bus(
+    db: &TestDb,
+) -> Result<(EventBus, std::sync::Arc<PostgresAuditLogRepository>), Box<dyn std::error::Error>> {
+    korgan::bootstrap::run_migrations(&db.pool).await?;
+    let audit = std::sync::Arc::new(PostgresAuditLogRepository::new(db.pool.clone()));
+    let (bus, _rx) = EventBus::new(8);
+    let bus = bus
+        .with_audit_outbox(audit.clone())
+        .with_unit_of_work(std::sync::Arc::new(PostgresUnitOfWork::new(
+            db.pool.clone(),
+        )));
+    Ok((bus, audit))
+}
+
+async fn user_exists(users: &PostgresUserRepository, user: &User) -> Result<bool, PortError> {
+    Ok(users.find_by_id(&user.id).await?.is_some())
+}
+
+#[tokio::test]
+#[ignore = "needs KORGAN_TEST_DATABASE_URL"]
+async fn audited_commits_the_state_change_and_its_audit_entry_together() -> TestResult {
+    let db = TestDb::create().await?;
+    let (bus, audit) = atomic_bus(&db).await?;
+    let users = PostgresUserRepository::new(db.pool.clone());
+    let user = new_user(1)?;
+
+    let id: UserId = bus
+        .audited(
+            async {
+                users.create(&user).await?;
+                Ok::<_, AppError>(user.id)
+            },
+            entry(1),
+        )
+        .await?;
+
+    assert_eq!(id, user.id);
+    assert!(user_exists(&users, &user).await?);
+    assert_eq!(audit.pending().await?, 1);
+    db.drop_db().await
+}
+
+#[tokio::test]
+#[ignore = "needs KORGAN_TEST_DATABASE_URL"]
+async fn audited_rolls_everything_back_when_the_work_fails() -> TestResult {
+    let db = TestDb::create().await?;
+    let (bus, audit) = atomic_bus(&db).await?;
+    let users = PostgresUserRepository::new(db.pool.clone());
+    let user = new_user(1)?;
+
+    let result: Result<(), AppError> = bus
+        .audited(
+            async {
+                users.create(&user).await?;
+                Err(AppError::Conflict) // fails after the write
+            },
+            entry(1),
+        )
+        .await;
+
+    assert!(matches!(result, Err(AppError::Conflict)));
+    assert!(
+        !user_exists(&users, &user).await?,
+        "state change must be rolled back"
+    );
+    assert_eq!(
+        audit.pending().await?,
+        0,
+        "no audit entry for a failed change"
+    );
+    db.drop_db().await
+}
+
+/// Outbox whose enqueue always fails: the state change must not survive.
+struct BrokenOutbox;
+
+#[async_trait::async_trait]
+impl korgan::ports::repositories::AuditOutbox for BrokenOutbox {
+    async fn enqueue(&self, _entry: &AuditLog) -> Result<(), PortError> {
+        Err(PortError::database("outbox down"))
+    }
+    async fn drain(&self, _limit: u32) -> Result<u32, PortError> {
+        Ok(0)
+    }
+    async fn pending(&self) -> Result<u64, PortError> {
+        Ok(0)
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs KORGAN_TEST_DATABASE_URL"]
+async fn audited_is_fail_closed_when_the_audit_entry_cannot_be_written() -> TestResult {
+    let db = TestDb::create().await?;
+    korgan::bootstrap::run_migrations(&db.pool).await?;
+    let (bus, _rx) = EventBus::new(8);
+    let bus = bus
+        .with_audit_outbox(std::sync::Arc::new(BrokenOutbox))
+        .with_unit_of_work(std::sync::Arc::new(PostgresUnitOfWork::new(
+            db.pool.clone(),
+        )));
+    let users = PostgresUserRepository::new(db.pool.clone());
+    let user = new_user(1)?;
+
+    let result = bus
+        .audited(
+            async {
+                users.create(&user).await?;
+                Ok::<_, AppError>(())
+            },
+            entry(1),
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        !user_exists(&users, &user).await?,
+        "no audit => no state change"
+    );
+    db.drop_db().await
+}
+
+#[tokio::test]
+#[ignore = "needs KORGAN_TEST_DATABASE_URL"]
+async fn audited_rolls_back_when_the_caller_is_cancelled() -> TestResult {
+    let db = TestDb::create().await?;
+    let (bus, audit) = atomic_bus(&db).await?;
+    let users = PostgresUserRepository::new(db.pool.clone());
+    let user = new_user(1)?;
+
+    // Client disconnect / timeout while the transaction is open.
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        bus.audited(
+            async {
+                users.create(&user).await?;
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok::<_, AppError>(())
+            },
+            entry(1),
+        ),
+    )
+    .await;
+
+    assert!(outcome.is_err(), "the call must have been cancelled");
+    assert!(!user_exists(&users, &user).await?);
+    assert_eq!(audit.pending().await?, 0);
+    db.drop_db().await
+}
+
+#[tokio::test]
+#[ignore = "needs KORGAN_TEST_DATABASE_URL"]
+async fn audited_reuses_one_connection_and_scales_under_concurrency() -> TestResult {
+    let db = TestDb::create().await?;
+    korgan::bootstrap::run_migrations(&db.pool).await?;
+
+    // A pool of ONE connection: if repository calls inside the unit of work
+    // used a second pooled connection they would deadlock.
+    let tiny = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect_with(db.pool.connect_options().as_ref().clone())
+        .await?;
+    let audit = std::sync::Arc::new(PostgresAuditLogRepository::new(tiny.clone()));
+    let (bus, _rx) = EventBus::new(8);
+    let bus = bus
+        .with_audit_outbox(audit.clone())
+        .with_unit_of_work(std::sync::Arc::new(PostgresUnitOfWork::new(tiny.clone())));
+    let users = std::sync::Arc::new(PostgresUserRepository::new(tiny.clone()));
+
+    let tasks: Vec<_> = (0..20u32)
+        .map(|n| {
+            let bus = bus.clone();
+            let users = users.clone();
+            tokio::spawn(async move {
+                let user = new_user(n).map_err(|e| {
+                    AppError::internal("user", std::io::Error::other(e.to_string()))
+                })?;
+                bus.audited(
+                    async {
+                        users.create(&user).await?;
+                        Ok::<_, AppError>(())
+                    },
+                    entry(n),
+                )
+                .await
+            })
+        })
+        .collect();
+    for task in tasks {
+        task.await??;
+    }
+
+    assert_eq!(audit.pending().await?, 20);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+        .fetch_one(&db.pool)
+        .await?;
+    assert_eq!(count, 20);
+    tiny.close().await;
+    db.drop_db().await
+}

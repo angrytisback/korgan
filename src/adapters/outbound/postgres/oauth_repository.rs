@@ -1,8 +1,9 @@
 //! PostgreSQL implementation of [`OAuthAccountRepository`].
 
 use async_trait::async_trait;
-use sqlx::PgPool;
+use sqlx::{Connection, PgPool};
 
+use crate::adapters::outbound::postgres::db::DbConn;
 use crate::adapters::outbound::postgres::models::{OAuthAccountRow, PgAccountStatus};
 use crate::domain::entities::{OAuthAccount, OAuthProvider, User};
 use crate::domain::value_objects::UserId;
@@ -20,6 +21,13 @@ impl PostgresOAuthAccountRepository {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Connection for one repository call (ambient transaction or pooled).
+    async fn conn(&self) -> Result<DbConn, PortError> {
+        DbConn::acquire(&self.pool)
+            .await
+            .map_err(|e| PortError::database(format!("failed to acquire connection: {e}")))
     }
 
     fn map_sqlx_error(e: sqlx::Error, action: &'static str) -> PortError {
@@ -42,6 +50,7 @@ impl OAuthAccountRepository for PostgresOAuthAccountRepository {
         provider: OAuthProvider,
         provider_user_id: &str,
     ) -> Result<Option<OAuthAccount>, PortError> {
+        let mut conn = self.conn().await?;
         let provider_str = provider.as_str();
 
         let row = sqlx::query_as!(
@@ -59,7 +68,7 @@ impl OAuthAccountRepository for PostgresOAuthAccountRepository {
             provider_str,
             provider_user_id
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_by_provider_and_id"))?;
 
@@ -67,6 +76,7 @@ impl OAuthAccountRepository for PostgresOAuthAccountRepository {
     }
 
     async fn create(&self, account: &OAuthAccount) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let id_uuid = account.id.to_uuid();
         let user_uuid = account.user_id.to_uuid();
         let provider_str = account.provider.as_str();
@@ -89,7 +99,7 @@ impl OAuthAccountRepository for PostgresOAuthAccountRepository {
             account.provider_user_id,
             account.created_at
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "create oauth account"))?;
 
@@ -101,8 +111,8 @@ impl OAuthAccountRepository for PostgresOAuthAccountRepository {
         user: Option<&User>,
         account: &OAuthAccount,
     ) -> Result<(), PortError> {
-        let mut tx = self
-            .pool
+        let mut conn = self.conn().await?;
+        let mut tx = conn
             .begin()
             .await
             .map_err(|e| Self::map_sqlx_error(e, "begin link_oauth_account transaction"))?;
@@ -187,6 +197,7 @@ impl OAuthAccountRepository for PostgresOAuthAccountRepository {
     }
 
     async fn list_by_user_id(&self, user_id: &UserId) -> Result<Vec<OAuthAccount>, PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = user_id.to_uuid();
 
         let rows = sqlx::query_as!(
@@ -204,7 +215,7 @@ impl OAuthAccountRepository for PostgresOAuthAccountRepository {
             "#,
             user_uuid
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "list_by_user_id"))?;
 
