@@ -5,6 +5,7 @@
 
 pub mod adapters;
 pub mod application;
+pub mod bootstrap;
 pub mod config;
 pub mod domain;
 pub mod ports;
@@ -22,7 +23,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 pub use crate::adapters::inbound::cli;
-use crate::adapters::inbound::http::{AppState, RouterError, build_router};
+use crate::adapters::inbound::http::{RouterError, build_router};
 use crate::config::Settings;
 
 /// Errors raised while running the HTTP server.
@@ -40,7 +41,7 @@ pub enum ServeError {
 /// Returns [`RouterError`] when the router cannot be configured.
 pub fn build_app(settings: Arc<Settings>) -> Result<Router, RouterError> {
     let (state, worker) =
-        AppState::from_settings(settings).map_err(RouterError::StateInitialization)?;
+        bootstrap::build_state(settings).map_err(RouterError::StateInitialization)?;
 
     let (_stop_tx, stop_rx) = watch::channel(false);
     if let Ok(handle) = tokio::runtime::Handle::try_current() {

@@ -14,7 +14,7 @@ use korgan::adapters::inbound::cli::{
     AuditCommands, Cli, Commands, UserCommands, handle_audit_verify, handle_bootstrap,
     handle_user_unlock,
 };
-use korgan::adapters::inbound::http::{AppState, build_router};
+use korgan::adapters::inbound::http::build_router;
 use korgan::application::use_cases::cancellation::wait_for_shielded_tasks;
 use korgan::application::workers::{RetentionGcWorker, join_worker};
 use korgan::config::Settings;
@@ -49,7 +49,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     telemetry::init(&settings.telemetry)?;
 
     let (state, mut worker) =
-        AppState::from_settings(settings.clone()).map_err(|e| e as Box<dyn Error>)?;
+        korgan::bootstrap::build_state(settings.clone()).map_err(|e| e as Box<dyn Error>)?;
 
     // Handle CLI subcommands if supplied
     match cli.command {
