@@ -10,4 +10,4 @@ Rate limit katmanı tüm rotalara uygulanıyordu. Redis erişilemezken limiter f
 
 ## Sonuçlar
 - (+) Redis kesintisinde pod'lar canlı kalır, readiness 503 ile trafikten çıkarılır.
-- (−) Bu rotalar için istemci başına sınır yok; hepsi ucuz ve yan etkisizdir. `/metrics` erişimi hâlâ ağ katmanında (nginx) kısıtlanmalıdır; ayrı dinleyici önerisi için bkz. `DECISIONS_NEEDED.md` (A-12).
+- (−) Bu rotalar için istemci başına sınır yok; hepsi ucuz ve yan etkisizdir. `/metrics` kimliksiz olduğundan ağ katmanında (nginx) kısıtlanmalıdır. Ek koruma olarak isteğe bağlı `server.metrics_addr` ile `/metrics` ayrı bir dinleyiciye taşınabilir; ayarlandığında public portta 404 döner (A-12).
