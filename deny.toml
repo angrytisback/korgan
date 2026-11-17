@@ -6,6 +6,12 @@ version = 2
 unmaintained = "all"
 yanked = "deny"
 ignore = [
+    # RUSTSEC-2026-0543: chrono is flagged as unmaintained (no known vulnerability).
+    # It is a mandatory transitive dependency (sqlx, serde integrations, webauthn-rs) and is
+    # only used for timestamps. Re-evaluate by 2027-03-01 or when a maintained release or
+    # replacement is available. Keep in sync with the --ignore flag of `cargo audit` in
+    # .github/workflows/ci.yml (the owner-managed .cargo/audit.toml is not edited here).
+    "RUSTSEC-2026-0543",
     # RUSTSEC-2026-0459 / CVE-2026-119375: SQLite WAL information disclosure in libsqlite3-sys < 0.39.0.
     # Korgan uses PostgreSQL & Redis only; SQLite runtime is not reachable.
     "RUSTSEC-2026-0459",
