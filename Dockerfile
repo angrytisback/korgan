@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ==============================================================================
-# STAGE 1: Builder (Alpine Linux targeting x86_64-unknown-linux-musl)
+# STAGE 1: Builder (Alpine Linux, static musl target matching TARGETARCH)
 # ==============================================================================
 FROM rust:alpine AS builder
 
@@ -30,8 +30,19 @@ COPY config/ ./config/
 COPY migrations/ ./migrations/
 COPY src/ ./src/
 
-# Compile static release binary targeting x86_64-unknown-linux-musl
-RUN cargo build --release --target x86_64-unknown-linux-musl
+# Compile a static release binary for the architecture being built
+# (amd64 -> x86_64-unknown-linux-musl, arm64 -> aarch64-unknown-linux-musl).
+# The classic builder does not set TARGETARCH; it defaults to amd64 below.
+# The binary stays at target/<triple>/release/korgan (the release workflow
+# copies it from there) and is also copied to /app/korgan for the next stage.
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) RUST_TARGET=x86_64-unknown-linux-musl ;; \
+      arm64) RUST_TARGET=aarch64-unknown-linux-musl ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && cargo build --release --target "${RUST_TARGET}" \
+ && cp "target/${RUST_TARGET}/release/korgan" /app/korgan
 
 # ==============================================================================
 # STAGE 2: Distroless Minimal Static Runtime
@@ -41,7 +52,7 @@ FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
 
 # Copy statically linked binary from builder stage
-COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/korgan /usr/local/bin/korgan
+COPY --from=builder /app/korgan /usr/local/bin/korgan
 
 # Run as nonroot user (UID 65532, GID 65532)
 USER 65532:65532
