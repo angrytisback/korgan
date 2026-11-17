@@ -254,6 +254,26 @@ pub trait AuditLogRepository: Send + Sync + 'static {
     }
 }
 
+/// Durable hand-off queue for audit events (transactional outbox).
+///
+/// [`enqueue`](Self::enqueue) is a single cheap write performed on the request
+/// path; [`drain`](Self::drain) later moves queued entries into the
+/// hash-chained audit ledger. Together they guarantee that an accepted audit
+/// event is never lost to a full in-memory queue or a crash, and is chained
+/// exactly once.
+#[async_trait]
+pub trait AuditOutbox: Send + Sync + 'static {
+    /// Durably queues an (unchained) audit entry.
+    async fn enqueue(&self, entry: &AuditLog) -> Result<(), PortError>;
+
+    /// Moves up to `limit` queued entries, oldest first, into the audit chain
+    /// atomically and returns how many were moved.
+    async fn drain(&self, limit: u32) -> Result<u32, PortError>;
+
+    /// Number of entries still waiting to be chained.
+    async fn pending(&self) -> Result<u64, PortError>;
+}
+
 /// Persistence operations for external [`OAuthAccount`] links.
 #[async_trait]
 pub trait OAuthAccountRepository: Send + Sync + 'static {

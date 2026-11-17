@@ -8,7 +8,7 @@ use chrono::Utc;
 use crate::application::dto::{AuthTokensResult, OAuthCallbackCommand};
 use crate::application::error::AppError;
 use crate::application::use_cases::token_utils::generate_opaque_token;
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::entities::{
     AccountStatus, AuditEventStatus, AuditLog, OAuthAccount, OAuthProvider, Session, User,
     audit_events,
@@ -110,7 +110,7 @@ impl OAuthCallbackUseCase {
 
         if !is_valid {
             self.event_bus
-                .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+                .record_audit(AuditLog::new(
                     None,
                     Some(cmd.ip_address),
                     cmd.user_agent,
@@ -121,7 +121,7 @@ impl OAuthCallbackUseCase {
                         "reason": if !cookie_matches { "oauth_state_cookie_mismatch" } else { "invalid_or_expired_oauth_state" },
                         "provider": cmd.provider.as_str()
                     }),
-                ))));
+                )).await;
 
             return Err(AppError::Forbidden);
         }
@@ -278,7 +278,7 @@ impl OAuthCallbackUseCase {
 
         // 5. Emit Audit Log
         self.event_bus
-            .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+            .record_audit(AuditLog::new(
                 Some(user.id),
                 Some(cmd.ip_address),
                 cmd.user_agent,
@@ -289,7 +289,8 @@ impl OAuthCallbackUseCase {
                     "provider": cmd.provider.as_str(),
                     "oauth_login": true
                 }),
-            ))));
+            ))
+            .await;
 
         Ok(AuthTokensResult {
             access_token,

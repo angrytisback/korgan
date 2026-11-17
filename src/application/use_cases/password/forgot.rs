@@ -83,7 +83,7 @@ impl ForgotPasswordUseCase {
             });
 
             self.event_bus
-                .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+                .record_audit(AuditLog::new(
                     Some(user.id),
                     cmd.ip_address,
                     cmd.user_agent,
@@ -91,7 +91,8 @@ impl ForgotPasswordUseCase {
                     audit_events::PASSWORD_RESET_REQUESTED,
                     AuditEventStatus::Success,
                     serde_json::json!({ "email": user.email.as_str() }),
-                ))));
+                ))
+                .await;
         }
 
         Ok(())

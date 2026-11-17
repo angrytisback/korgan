@@ -8,7 +8,7 @@ use validator::Validate;
 use crate::application::dto::VerifyEmailCommand;
 use crate::application::error::AppError;
 use crate::application::use_cases::token_utils::hash_token;
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::entities::audit_events;
 use crate::domain::entities::{AuditEventStatus, AuditLog};
 use crate::domain::value_objects::UserId;
@@ -87,7 +87,7 @@ impl VerifyEmailUseCase {
         self.user_repo.update(&user).await?;
 
         self.event_bus
-            .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+            .record_audit(AuditLog::new(
                 Some(user.id),
                 cmd.ip_address,
                 cmd.user_agent,
@@ -95,7 +95,8 @@ impl VerifyEmailUseCase {
                 audit_events::EMAIL_VERIFIED,
                 AuditEventStatus::Success,
                 serde_json::json!({ "email": user.email.as_str() }),
-            ))));
+            ))
+            .await;
 
         Ok(())
     }

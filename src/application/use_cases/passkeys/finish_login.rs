@@ -11,7 +11,7 @@ use crate::application::dto::auth::AuthTokensResult;
 use crate::application::dto::passkeys::PasskeyLoginFinishCommand;
 use crate::application::error::AppError;
 use crate::application::use_cases::token_utils::generate_opaque_token;
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::entities::{AuditEventStatus, AuditLog, Session, audit_events};
 use crate::domain::errors::DomainError;
 use crate::ports::cache::TokenStore;
@@ -135,7 +135,7 @@ impl FinishPasskeyLoginUseCase {
                         "reason": "passkey credential not found",
                     }),
                 );
-                self.event_bus.dispatch(AppEvent::LogAudit(Box::new(audit)));
+                self.event_bus.record_audit(audit).await;
                 return Err(AppError::InvalidCredentials);
             }
         };
@@ -160,7 +160,7 @@ impl FinishPasskeyLoginUseCase {
                         "reason": e.to_string(),
                     }),
                 );
-                self.event_bus.dispatch(AppEvent::LogAudit(Box::new(audit)));
+                self.event_bus.record_audit(audit).await;
                 return Err(AppError::InvalidCredentials);
             }
         };
@@ -190,7 +190,7 @@ impl FinishPasskeyLoginUseCase {
                     "reason": domain_err.to_string(),
                 }),
             );
-            self.event_bus.dispatch(AppEvent::LogAudit(Box::new(audit)));
+            self.event_bus.record_audit(audit).await;
             return Err(AppError::from(domain_err));
         }
 
@@ -252,7 +252,7 @@ impl FinishPasskeyLoginUseCase {
                 "session_id": session.id,
             }),
         );
-        self.event_bus.dispatch(AppEvent::LogAudit(Box::new(audit)));
+        self.event_bus.record_audit(audit).await;
 
         Ok(AuthTokensResult {
             access_token,

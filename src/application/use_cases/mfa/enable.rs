@@ -9,7 +9,7 @@ use zeroize::Zeroize;
 use crate::application::dto::{EnableTotpCommand, TotpEnabledResult};
 use crate::application::error::AppError;
 use crate::application::use_cases::token_utils::{decode_base32, generate_backup_codes};
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::entities::audit_events;
 use crate::domain::entities::{AuditEventStatus, AuditLog, UserMfa};
 use crate::domain::errors::FieldViolation;
@@ -118,7 +118,7 @@ impl EnableTotpUseCase {
         })?;
 
         self.event_bus
-            .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+            .record_audit(AuditLog::new(
                 Some(cmd.user_id),
                 cmd.ip_address,
                 cmd.user_agent,
@@ -126,7 +126,8 @@ impl EnableTotpUseCase {
                 audit_events::MFA_ENABLED,
                 AuditEventStatus::Success,
                 serde_json::json!({ "mfa_type": "totp" }),
-            ))));
+            ))
+            .await;
 
         Ok(TotpEnabledResult {
             backup_codes: plaintexts,

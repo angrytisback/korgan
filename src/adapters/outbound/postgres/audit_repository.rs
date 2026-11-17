@@ -9,7 +9,7 @@ use crate::adapters::outbound::postgres::models::AuditLogRow;
 use crate::domain::entities::AuditLog;
 use crate::domain::value_objects::UserId;
 use crate::ports::errors::PortError;
-use crate::ports::repositories::AuditLogRepository;
+use crate::ports::repositories::{AuditLogRepository, AuditOutbox};
 
 /// Advisory transaction lock identifier for serializing audit log chain mutations.
 const AUDIT_LOCK_ID: i64 = 75_798_247;
@@ -311,6 +311,156 @@ impl AuditLogRepository for PostgresAuditLogRepository {
         .await
         .map_err(|e| Self::map_sqlx_error(e, "count_all"))?;
 
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+}
+
+#[async_trait]
+impl AuditOutbox for PostgresAuditLogRepository {
+    async fn enqueue(&self, entry: &AuditLog) -> Result<(), PortError> {
+        let payload = serde_json::to_value(entry)
+            .map_err(|e| PortError::database(format!("serialize audit entry failed: {e}")))?;
+
+        sqlx::query("INSERT INTO audit_outbox (payload) VALUES ($1)")
+            .bind(payload)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Self::map_sqlx_error(e, "enqueue audit entry"))?;
+
+        Ok(())
+    }
+
+    async fn drain(&self, limit: u32) -> Result<u32, PortError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| Self::map_sqlx_error(e, "begin transaction"))?;
+
+        // Same lock as `append_and_chain`: one writer extends the chain at a time.
+        sqlx::query("SELECT pg_advisory_xact_lock($1);")
+            .bind(AUDIT_LOCK_ID)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Self::map_sqlx_error(e, "acquire advisory xact lock"))?;
+
+        let queued: Vec<(i64, serde_json::Value)> = sqlx::query_as(
+            r#"
+            SELECT seq, payload
+            FROM audit_outbox
+            WHERE quarantined_at IS NULL
+            ORDER BY seq
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+            "#,
+        )
+        .bind(i64::from(limit))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| Self::map_sqlx_error(e, "read audit outbox"))?;
+
+        if queued.is_empty() {
+            return Ok(0);
+        }
+
+        let latest_row: Option<(DateTime<Utc>, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT created_at, entry_hash
+            FROM audit_logs
+            WHERE entry_hash IS NOT NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| Self::map_sqlx_error(e, "find_latest_entry_hash"))?;
+
+        let (mut prev_created_at, mut prev_hash) = match latest_row {
+            Some((created_at, hash)) => (Some(created_at), hash),
+            None => (None, None),
+        };
+
+        let mut done: Vec<i64> = Vec::with_capacity(queued.len());
+        let mut poisoned: Vec<i64> = Vec::new();
+
+        for (seq, payload) in queued {
+            let mut entry: AuditLog = match serde_json::from_value(payload) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    tracing::error!(seq, error = %e, "audit outbox entry is malformed; quarantining");
+                    poisoned.push(seq);
+                    continue;
+                }
+            };
+
+            // Strictly monotonic timestamps, exactly like `append_and_chain`.
+            let now = Utc::now();
+            let created_at = match prev_created_at {
+                Some(prev) if now <= prev => prev + Duration::microseconds(1),
+                _ => now,
+            };
+            entry.chain_with_timestamp(prev_hash.as_deref(), created_at);
+
+            sqlx::query(
+                r#"
+                INSERT INTO audit_logs (
+                    id, user_id, actor_ip, user_agent, request_id, event_type,
+                    event_status, metadata, prev_hash, entry_hash, created_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                "#,
+            )
+            .bind(entry.id.to_uuid())
+            .bind(entry.user_id.as_ref().map(|u| u.to_uuid()))
+            .bind(entry.actor_ip.map(IpNetwork::from))
+            .bind(entry.user_agent.as_deref())
+            .bind(entry.request_id.to_uuid())
+            .bind(&entry.event_type)
+            .bind(entry.event_status.as_str())
+            .bind(&entry.metadata)
+            .bind(entry.prev_hash.as_deref())
+            .bind(entry.entry_hash.as_deref())
+            .bind(entry.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Self::map_sqlx_error(e, "chain audit entry"))?;
+
+            prev_created_at = Some(entry.created_at);
+            prev_hash = entry.entry_hash.clone();
+            done.push(seq);
+        }
+
+        if !done.is_empty() {
+            sqlx::query("DELETE FROM audit_outbox WHERE seq = ANY($1)")
+                .bind(&done)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Self::map_sqlx_error(e, "delete drained audit entries"))?;
+        }
+        if !poisoned.is_empty() {
+            sqlx::query("UPDATE audit_outbox SET quarantined_at = NOW() WHERE seq = ANY($1)")
+                .bind(&poisoned)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Self::map_sqlx_error(e, "quarantine audit entries"))?;
+            metrics::counter!("korgan_audit_outbox_quarantined_total")
+                .increment(poisoned.len() as u64);
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| Self::map_sqlx_error(e, "commit audit outbox drain"))?;
+
+        metrics::gauge!("korgan_audit_chain_length").increment(done.len() as f64);
+        Ok(u32::try_from(done.len()).unwrap_or(u32::MAX))
+    }
+
+    async fn pending(&self) -> Result<u64, PortError> {
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_outbox WHERE quarantined_at IS NULL")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| Self::map_sqlx_error(e, "count audit outbox"))?;
         Ok(u64::try_from(count).unwrap_or(0))
     }
 }

@@ -6,7 +6,7 @@ use validator::Validate;
 
 use crate::application::dto::RevokeAllSessionsCommand;
 use crate::application::error::AppError;
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::entities::audit_events;
 use crate::domain::entities::{AuditEventStatus, AuditLog};
 use crate::ports::cache::TokenStore;
@@ -85,7 +85,7 @@ impl RevokeAllSessionsUseCase {
         .await?;
 
         self.event_bus
-            .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+            .record_audit(AuditLog::new(
                 Some(cmd.user_id),
                 cmd.ip_address,
                 cmd.user_agent,
@@ -96,7 +96,8 @@ impl RevokeAllSessionsUseCase {
                     "revoked_all": true,
                     "exempt_session": cmd.except_session_id.map(|s| s.to_string()),
                 }),
-            ))));
+            ))
+            .await;
 
         Ok(())
     }

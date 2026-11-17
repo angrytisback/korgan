@@ -120,6 +120,10 @@ fail_open = true
 # Bounded in-memory queue shared by audit and e-mail events. When it is full,
 # events are dropped and counted in korgan_events_dropped_total.
 event_queue_capacity = 1024
+# Audit events are queued durably in the audit_outbox table and chained in
+# batches by the worker; these control the batch size and the polling delay.
+audit_outbox_batch_size = 200
+audit_outbox_poll_ms = 1000
 gc_interval_secs = 3600
 gc_batch_size = 500
 unverified_retention_secs = 604800

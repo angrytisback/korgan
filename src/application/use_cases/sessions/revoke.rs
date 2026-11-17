@@ -6,7 +6,7 @@ use validator::Validate;
 
 use crate::application::dto::RevokeSessionCommand;
 use crate::application::error::AppError;
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::entities::audit_events;
 use crate::domain::entities::{AuditEventStatus, AuditLog};
 use crate::ports::cache::TokenStore;
@@ -82,7 +82,7 @@ impl RevokeSessionUseCase {
         .await?;
 
         self.event_bus
-            .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+            .record_audit(AuditLog::new(
                 Some(cmd.user_id),
                 cmd.ip_address,
                 cmd.user_agent,
@@ -90,7 +90,8 @@ impl RevokeSessionUseCase {
                 audit_events::SESSION_REVOKED,
                 AuditEventStatus::Success,
                 serde_json::json!({ "session_id": cmd.session_id.to_string() }),
-            ))));
+            ))
+            .await;
 
         Ok(())
     }

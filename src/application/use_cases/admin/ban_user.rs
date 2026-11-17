@@ -7,7 +7,7 @@ use validator::Validate;
 
 use crate::application::dto::{BanUserCommand, BanUserResult};
 use crate::application::error::AppError;
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::entities::{AuditEventStatus, AuditLog};
 use crate::domain::value_objects::RequestId;
 use crate::ports::cache::TokenStore;
@@ -115,7 +115,7 @@ impl BanUserUseCase {
             AuditEventStatus::Success,
             serde_json::Value::Object(metadata),
         );
-        self.event_bus.dispatch(AppEvent::LogAudit(Box::new(audit)));
+        self.event_bus.record_audit(audit).await;
 
         Ok(BanUserResult {
             id: user.id,
