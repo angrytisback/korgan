@@ -18,7 +18,7 @@ use korgan::adapters::inbound::http::{AppState, build_router};
 use korgan::application::use_cases::cancellation::wait_for_shielded_tasks;
 use korgan::application::workers::{RetentionGcWorker, join_worker};
 use korgan::config::Settings;
-use korgan::{security, serve, shutdown_signal, telemetry};
+use korgan::{build_metrics_router, security, serve, shutdown_signal, telemetry};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
@@ -109,9 +109,38 @@ async fn run() -> Result<(), Box<dyn Error>> {
         "korgan listening"
     );
 
+    // One OS signal stops every listener.
+    let (signal_tx, signal_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        // Receivers only disappear when the servers are already gone.
+        let _ = signal_tx.send(true);
+    });
+
+    let metrics_handle = match settings.metrics_socket_addr() {
+        Some(metrics_addr) => {
+            let metrics_listener = TcpListener::bind(metrics_addr).await?;
+            tracing::info!(address = %metrics_addr, "metrics listener started");
+            Some(tokio::spawn(serve(
+                metrics_listener,
+                build_metrics_router(),
+                wait_for_signal(signal_rx.clone()),
+                grace,
+            )))
+        }
+        None => None,
+    };
+
     // Keep the result: workers must be drained even when the server failed,
     // otherwise buffered audit events would be lost on an unclean exit.
-    let served = serve(listener, app, shutdown_signal(), grace).await;
+    let served = serve(listener, app, wait_for_signal(signal_rx), grace).await;
+    if let Some(handle) = metrics_handle {
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::error!(%error, "metrics listener terminated with an error"),
+            Err(error) => tracing::error!(%error, "metrics listener task failed"),
+        }
+    }
     if let Err(error) = &served {
         tracing::error!(%error, "http server terminated with an error; draining workers");
     }
@@ -146,4 +175,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     tracing::info!("korgan stopped");
     Ok(())
+}
+
+/// Resolves once the shared shutdown signal has fired.
+async fn wait_for_signal(mut signal: watch::Receiver<bool>) {
+    // A closed channel means the signal task is gone: treat it as shutdown.
+    let _ = signal.wait_for(|fired| *fired).await;
 }

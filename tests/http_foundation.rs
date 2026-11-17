@@ -242,3 +242,51 @@ async fn normaliser_preserves_protocol_headers() -> TestResult {
     assert!(response.headers().get(RETRY_AFTER).is_none());
     Ok(())
 }
+
+#[tokio::test]
+async fn metrics_are_served_on_the_public_router_by_default() -> TestResult {
+    let response = send(app()?, get("/metrics")?).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn metrics_leave_the_public_router_when_a_dedicated_listener_is_configured() -> TestResult {
+    let app = app_with(&[("KORGAN__SERVER__METRICS_ADDR", "127.0.0.1:9100")])?;
+    let response = send(app, get("/metrics")?).await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Probes stay on the public listener.
+    let app = app_with(&[("KORGAN__SERVER__METRICS_ADDR", "127.0.0.1:9100")])?;
+    let response = send(app, get("/health/live")?).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[test]
+fn invalid_metrics_addr_is_rejected_at_startup() {
+    let env = HashMap::from([
+        (
+            "DATABASE_URL".to_owned(),
+            "postgres://u:p@localhost:5432/db".to_owned(),
+        ),
+        ("REDIS_URL".to_owned(), "redis://localhost:6379".to_owned()),
+        (
+            "KORGAN__CRYPTO__ED25519_PRIVATE_KEY_PEM".to_owned(),
+            TEST_PEM.to_owned(),
+        ),
+        (
+            "KORGAN__CRYPTO__AES_MASTER_KEY".to_owned(),
+            TEST_AES.to_owned(),
+        ),
+        (
+            "KORGAN__SERVER__METRICS_ADDR".to_owned(),
+            "not-an-address".to_owned(),
+        ),
+    ]);
+    let error = Settings::load_from_env(env).err().map(|e| e.to_string());
+    assert!(
+        error.is_some_and(|e| e.contains("server.metrics_addr")),
+        "invalid metrics_addr must fail validation"
+    );
+}

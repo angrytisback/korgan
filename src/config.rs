@@ -244,6 +244,10 @@ pub struct ServerSettings {
     pub request_timeout_secs: u64,
     /// Time allowed for in-flight requests during graceful shutdown.
     pub shutdown_grace_secs: u64,
+    /// Optional `ip:port` of a dedicated listener for `/metrics`. When set,
+    /// metrics are no longer served on the public listener.
+    #[serde(default)]
+    pub metrics_addr: Option<String>,
 }
 
 /// Logging / tracing settings.
@@ -600,6 +604,11 @@ impl Settings {
         if server.port == 0 {
             problems.push("server.port must be non-zero".to_owned());
         }
+        if let Some(addr) = &server.metrics_addr
+            && addr.parse::<SocketAddr>().is_err()
+        {
+            problems.push("server.metrics_addr must be a valid ip:port socket address".to_owned());
+        }
         if server.request_body_limit_bytes == 0 {
             problems.push("server.request_body_limit_bytes must be greater than zero".to_owned());
         }
@@ -910,6 +919,15 @@ impl Settings {
             self.is_production(),
             problems,
         );
+    }
+
+    /// Parsed address of the dedicated metrics listener, if configured.
+    #[must_use]
+    pub fn metrics_socket_addr(&self) -> Option<SocketAddr> {
+        self.server
+            .metrics_addr
+            .as_deref()
+            .and_then(|a| a.parse().ok())
     }
 
     /// Socket address the HTTP server binds to.

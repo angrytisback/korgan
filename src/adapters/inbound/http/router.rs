@@ -132,11 +132,17 @@ pub fn build_router(state: AppState) -> Result<Router, RouterError> {
         .route("/admin/users/{id}/ban", post(admin::ban_user))
         .route("/admin/users/{id}/unban", post(admin::unban_user));
 
-    Ok(Router::new()
+    let mut public = Router::new()
         .route("/health", get(health::live))
         .route("/health/live", get(health::live))
-        .route("/health/ready", get(health::ready))
-        .route("/metrics", get(metrics::metrics))
+        .route("/health/ready", get(health::ready));
+    // With a dedicated metrics listener configured, /metrics must not be
+    // reachable through the public listener.
+    if settings.server.metrics_addr.is_none() {
+        public = public.route("/metrics", get(metrics::metrics));
+    }
+
+    Ok(public
         .route("/.well-known/jwks.json", get(jwks::jwks))
         .nest("/api/v1", api_v1)
         .merge(openapi::routes())
