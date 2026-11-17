@@ -125,3 +125,75 @@ async fn worker_keeps_processing_events_after_stop_sender_is_dropped() -> TestRe
     tokio::time::timeout(Duration::from_secs(2), handle).await??;
     Ok(())
 }
+
+/// Mail provider that never completes within the test horizon.
+#[derive(Debug, Default)]
+struct StalledMailProvider {
+    started: AtomicUsize,
+}
+
+#[async_trait]
+impl korgan::ports::services::MailProvider for StalledMailProvider {
+    async fn send_email(
+        &self,
+        _to: &korgan::domain::value_objects::EmailAddress,
+        _subject: &str,
+        _text_body: &str,
+        _html_body: &str,
+    ) -> Result<(), PortError> {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(3_600)).await;
+        Ok(())
+    }
+}
+
+/// A stalled mail server must not delay audit persistence (head-of-line blocking).
+#[tokio::test]
+async fn stalled_mail_provider_does_not_block_audit_persistence() -> TestResult {
+    let repo = Arc::new(RecordingAuditRepo::default());
+    let mail = Arc::new(StalledMailProvider::default());
+    let (bus, rx) = EventBus::new(16);
+    let worker = EventWorker::new(
+        rx,
+        mail.clone(),
+        repo.clone(),
+        "https://example.test".to_owned(),
+    );
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let handle = tokio::spawn(worker.run(stop_rx));
+
+    bus.dispatch(AppEvent::SendVerificationEmail {
+        to: korgan::domain::value_objects::EmailAddress::parse("user@example.com")?,
+        token: "tok".to_owned(),
+    });
+    bus.dispatch(audit_event());
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if repo.entries.lock().map(|e| e.len()).unwrap_or(0) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| "audit event was blocked behind a stalled mail send")?;
+    assert_eq!(mail.started.load(Ordering::SeqCst), 1);
+
+    stop_tx.send(true)?;
+    handle.abort();
+    Ok(())
+}
+
+/// A full queue drops (rather than blocks) and never panics.
+#[tokio::test]
+async fn dispatch_on_full_queue_drops_without_blocking() {
+    let (bus, mut rx) = EventBus::new(1);
+    bus.dispatch(audit_event());
+    bus.dispatch(audit_event());
+    assert!(rx.try_recv().is_ok());
+    assert!(
+        rx.try_recv().is_err(),
+        "second event must have been dropped"
+    );
+}

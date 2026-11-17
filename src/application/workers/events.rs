@@ -34,6 +34,18 @@ pub enum AppEvent {
     LogAudit(Box<AuditLog>),
 }
 
+impl AppEvent {
+    /// Stable, low-cardinality label for metrics and logs.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::SendVerificationEmail { .. } => "verification_email",
+            Self::SendPasswordResetEmail { .. } => "password_reset_email",
+            Self::LogAudit(_) => "audit",
+        }
+    }
+}
+
 impl std::fmt::Debug for AppEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -77,15 +89,18 @@ impl EventBus {
     /// If the channel is saturated or closed, a warning is logged and the event
     /// is dropped rather than stalling the request/response cycle.
     pub fn dispatch(&self, event: AppEvent) {
+        let kind = event.kind();
         if let Err(e) = self.sender.try_send(event) {
-            match e {
-                mpsc::error::TrySendError::Full(_) => {
-                    warn!("event bus channel saturated; background event dropped");
-                }
-                mpsc::error::TrySendError::Closed(_) => {
-                    warn!("event bus receiver closed; background event dropped");
-                }
-            }
+            let reason = match e {
+                mpsc::error::TrySendError::Full(_) => "queue_full",
+                mpsc::error::TrySendError::Closed(_) => "receiver_closed",
+            };
+            metrics::counter!("korgan_events_dropped_total", "kind" => kind, "reason" => reason)
+                .increment(1);
+            warn!(
+                kind,
+                reason, "event bus could not accept event; background event dropped"
+            );
         }
     }
 
