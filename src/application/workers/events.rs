@@ -10,6 +10,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tracing::{error, warn};
 
 use crate::application::error::AppError;
+use crate::application::unit_of_work::UnitOfWork;
 use crate::application::use_cases::shielded;
 use crate::ports::repositories::AuditOutbox;
 
@@ -80,6 +81,7 @@ impl std::fmt::Debug for AppEvent {
 pub struct EventBus {
     sender: Sender<AppEvent>,
     audit_outbox: Option<Arc<dyn AuditOutbox>>,
+    unit_of_work: Option<Arc<dyn UnitOfWork>>,
     outbox_wake: Arc<Notify>,
 }
 
@@ -105,6 +107,7 @@ impl EventBus {
         Self {
             sender,
             audit_outbox: None,
+            unit_of_work: None,
             outbox_wake: Arc::new(Notify::new()),
         }
     }
@@ -116,10 +119,66 @@ impl EventBus {
         self
     }
 
+    /// Enables [`audited`](Self::audited) to commit a state change and its
+    /// audit entry in one database transaction.
+    #[must_use]
+    pub fn with_unit_of_work(mut self, unit_of_work: Arc<dyn UnitOfWork>) -> Self {
+        self.unit_of_work = Some(unit_of_work);
+        self
+    }
+
     /// Signal raised after every successful outbox enqueue; the worker waits on it.
     #[must_use]
     pub fn audit_outbox_wake(&self) -> Arc<Notify> {
         self.outbox_wake.clone()
+    }
+
+    /// Runs `work` and records `audit` for it, atomically when possible.
+    ///
+    /// With a unit of work and an outbox (production), `work` and the audit
+    /// INSERT share one database transaction: either the state change and its
+    /// audit entry both commit, or neither does. If the audit entry cannot be
+    /// written, the state change is rolled back (fail-closed).
+    ///
+    /// Without them (in-memory fakes) this runs `work` and then falls back to
+    /// [`record_audit`](Self::record_audit).
+    ///
+    /// `work` must only perform database repository calls directly (it must not
+    /// spawn tasks or touch Redis): spawned tasks do not join the transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of `work`, or an error if the transaction fails.
+    pub async fn audited<T, W>(&self, work: W, audit: AuditLog) -> Result<T, AppError>
+    where
+        T: Send,
+        W: std::future::Future<Output = Result<T, AppError>> + Send,
+    {
+        let (Some(unit_of_work), Some(outbox)) = (&self.unit_of_work, &self.audit_outbox) else {
+            let value = work.await?;
+            self.record_audit(audit).await;
+            return Ok(value);
+        };
+
+        let outbox = outbox.clone();
+        let mut slot: Option<T> = None;
+        let target = &mut slot;
+        unit_of_work
+            .run(Box::pin(async move {
+                let value = work.await?;
+                outbox.enqueue(&audit).await.map_err(AppError::from)?;
+                *target = Some(value);
+                Ok(())
+            }))
+            .await?;
+        self.outbox_wake.notify_one();
+
+        slot.ok_or_else(|| {
+            AppError::internal(
+                "unit of work finished without a result",
+                std::io::Error::other("missing result"),
+            )
+        })
     }
 
     /// Records an audit entry.

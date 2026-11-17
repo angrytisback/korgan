@@ -2,9 +2,10 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
-use sqlx::PgPool;
+use sqlx::{Connection, PgPool};
 use uuid::Uuid;
 
+use crate::adapters::outbound::postgres::db::DbConn;
 use crate::adapters::outbound::postgres::models::{PgAccountStatus, UserMfaRow, UserRow};
 use crate::domain::entities::{User, UserMfa};
 use crate::domain::value_objects::{EmailAddress, PasswordHash, UserId, Username};
@@ -24,6 +25,13 @@ impl PostgresUserRepository {
         Self { pool }
     }
 
+    /// Connection for one repository call (ambient transaction or pooled).
+    async fn conn(&self) -> Result<DbConn, PortError> {
+        DbConn::acquire(&self.pool)
+            .await
+            .map_err(|e| PortError::database(format!("failed to acquire connection: {e}")))
+    }
+
     /// Maps sqlx database errors to standard [`PortError`] values without leaking internal info.
     fn map_sqlx_error(e: sqlx::Error, action: &'static str) -> PortError {
         if let Some(db_err) = e.as_database_error()
@@ -41,6 +49,7 @@ impl PostgresUserRepository {
 #[async_trait]
 impl UserRepository for PostgresUserRepository {
     async fn find_by_id(&self, id: &UserId) -> Result<Option<User>, PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = id.to_uuid();
 
         let row = sqlx::query_as!(
@@ -65,7 +74,7 @@ impl UserRepository for PostgresUserRepository {
             "#,
             user_uuid
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_by_id"))?;
 
@@ -73,6 +82,7 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn find_by_email(&self, email: &EmailAddress) -> Result<Option<User>, PortError> {
+        let mut conn = self.conn().await?;
         let email_str = email.as_str();
 
         let row = sqlx::query_as!(
@@ -97,7 +107,7 @@ impl UserRepository for PostgresUserRepository {
             "#,
             email_str
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_by_email"))?;
 
@@ -105,6 +115,7 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn find_by_username(&self, username: &Username) -> Result<Option<User>, PortError> {
+        let mut conn = self.conn().await?;
         let username_str = username.as_str();
 
         let row = sqlx::query_as!(
@@ -129,7 +140,7 @@ impl UserRepository for PostgresUserRepository {
             "#,
             username_str
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_by_username"))?;
 
@@ -137,6 +148,7 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn create(&self, user: &User) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let pg_status: PgAccountStatus = user.status.into();
         let user_uuid = user.id.to_uuid();
         let username_str = user.username.as_ref().map(|u| u.as_str());
@@ -177,7 +189,7 @@ impl UserRepository for PostgresUserRepository {
             user.created_at,
             user.updated_at
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "create user"))?;
 
@@ -185,6 +197,7 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn update(&self, user: &User) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let pg_status: PgAccountStatus = user.status.into();
         let user_uuid = user.id.to_uuid();
         let username_str = user.username.as_ref().map(|u| u.as_str());
@@ -220,7 +233,7 @@ impl UserRepository for PostgresUserRepository {
             user.deletion_scheduled_at,
             user.updated_at
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "update user"))?;
 
@@ -232,6 +245,7 @@ impl UserRepository for PostgresUserRepository {
         user_id: &UserId,
         new_username: Option<&Username>,
     ) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = user_id.to_uuid();
         let username_str = new_username.map(|u| u.as_str());
         let now = Utc::now();
@@ -247,7 +261,7 @@ impl UserRepository for PostgresUserRepository {
         .bind(user_uuid)
         .bind(username_str)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "update_username"))?;
 
@@ -264,13 +278,13 @@ impl UserRepository for PostgresUserRepository {
         new_hash: &PasswordHash,
         history_depth: u16,
     ) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = user_id.to_uuid();
         let now = Utc::now();
         let history_id = Uuid::now_v7();
         let depth_i64 = i64::from(history_depth);
 
-        let mut tx = self
-            .pool
+        let mut tx = conn
             .begin()
             .await
             .map_err(|e| PortError::database(format!("failed to begin transaction: {e}")))?;
@@ -343,6 +357,7 @@ impl UserRepository for PostgresUserRepository {
         user_id: &UserId,
         limit: u32,
     ) -> Result<Vec<PasswordHash>, PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = user_id.to_uuid();
         let limit_i64 = i64::from(limit);
 
@@ -357,7 +372,7 @@ impl UserRepository for PostgresUserRepository {
             user_uuid,
             limit_i64
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "get password history"))?;
 
@@ -372,6 +387,7 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn find_mfa(&self, user_id: &UserId) -> Result<Option<UserMfa>, PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = user_id.to_uuid();
 
         let row = sqlx::query_as::<_, UserMfaRow>(
@@ -389,7 +405,7 @@ impl UserRepository for PostgresUserRepository {
             "#,
         )
         .bind(user_uuid)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_mfa"))?;
 
@@ -397,6 +413,7 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn save_mfa(&self, mfa: &UserMfa) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = mfa.user_id.to_uuid();
 
         sqlx::query(
@@ -428,7 +445,7 @@ impl UserRepository for PostgresUserRepository {
         .bind(&mfa.backup_code_hashes)
         .bind(mfa.verified_at)
         .bind(mfa.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "save_mfa"))?;
 
@@ -436,10 +453,11 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn enable_mfa(&self, mfa: &UserMfa) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = mfa.user_id.to_uuid();
         let now = Utc::now();
 
-        let mut tx = self.pool.begin().await.map_err(|e| {
+        let mut tx = conn.begin().await.map_err(|e| {
             PortError::database(format!("failed to begin enable_mfa transaction: {e}"))
         })?;
 
@@ -502,10 +520,11 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn delete_mfa(&self, user_id: &UserId) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = user_id.to_uuid();
         let now = Utc::now();
 
-        let mut tx = self.pool.begin().await.map_err(|e| {
+        let mut tx = conn.begin().await.map_err(|e| {
             PortError::database(format!("failed to begin delete_mfa transaction: {e}"))
         })?;
 
@@ -546,6 +565,7 @@ impl UserRepository for PostgresUserRepository {
         user_id: &UserId,
         code_hash: &str,
     ) -> Result<bool, PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = user_id.to_uuid();
 
         let result = sqlx::query(
@@ -558,7 +578,7 @@ impl UserRepository for PostgresUserRepository {
         )
         .bind(user_uuid)
         .bind(code_hash)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "consume_backup_code"))?;
 
@@ -572,6 +592,7 @@ impl UserRepository for PostgresUserRepository {
         lockout_until: chrono::DateTime<chrono::Utc>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(u16, Option<chrono::DateTime<chrono::Utc>>), PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = user_id.to_uuid();
         let max_attempts_i16 = i16::try_from(max_attempts).unwrap_or(i16::MAX);
 
@@ -599,7 +620,7 @@ impl UserRepository for PostgresUserRepository {
         .bind(max_attempts_i16)
         .bind(lockout_until)
         .bind(now)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "record_failed_login_atomic"))?;
 
@@ -617,6 +638,7 @@ impl UserRepository for PostgresUserRepository {
         user_id: &UserId,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = user_id.to_uuid();
 
         sqlx::query(
@@ -631,7 +653,7 @@ impl UserRepository for PostgresUserRepository {
         )
         .bind(user_uuid)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "reset_failed_logins"))?;
 
@@ -639,6 +661,7 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn list_paginated(&self, limit: u32, offset: u64) -> Result<Vec<User>, PortError> {
+        let mut conn = self.conn().await?;
         let limit_i64 = i64::from(limit);
         let offset_i64 = i64::try_from(offset).unwrap_or(i64::MAX);
 
@@ -666,7 +689,7 @@ impl UserRepository for PostgresUserRepository {
             limit_i64,
             offset_i64
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "list_paginated"))?;
 
@@ -674,12 +697,13 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn count_all(&self) -> Result<u64, PortError> {
+        let mut conn = self.conn().await?;
         let row = sqlx::query!(
             r#"
             SELECT COUNT(*) as "count!" FROM users
             "#
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "count_all"))?;
 
@@ -691,6 +715,7 @@ impl UserRepository for PostgresUserRepository {
         created_before: chrono::DateTime<chrono::Utc>,
         max_purge: u32,
     ) -> Result<u64, PortError> {
+        let mut conn = self.conn().await?;
         let max_purge_i64 = i64::from(max_purge);
 
         let row: (i64,) = sqlx::query_as(
@@ -709,7 +734,7 @@ impl UserRepository for PostgresUserRepository {
         )
         .bind(created_before)
         .bind(max_purge_i64)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "purge_expired_unverified"))?;
 
@@ -718,6 +743,7 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn has_admin_user(&self) -> Result<bool, PortError> {
+        let mut conn = self.conn().await?;
         let exists: bool = sqlx::query_scalar(
             r#"
             SELECT EXISTS(
@@ -725,7 +751,7 @@ impl UserRepository for PostgresUserRepository {
             )
             "#,
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "has_admin_user"))?;
 

@@ -5,6 +5,7 @@ use chrono::{DateTime, Duration, Utc};
 use ipnetwork::IpNetwork;
 use sqlx::PgPool;
 
+use crate::adapters::outbound::postgres::db::DbConn;
 use crate::adapters::outbound::postgres::models::AuditLogRow;
 use crate::domain::entities::AuditLog;
 use crate::domain::value_objects::UserId;
@@ -321,9 +322,14 @@ impl AuditOutbox for PostgresAuditLogRepository {
         let payload = serde_json::to_value(entry)
             .map_err(|e| PortError::database(format!("serialize audit entry failed: {e}")))?;
 
+        // Joins the ambient unit-of-work transaction when there is one, so the
+        // entry commits atomically with the state change it describes.
+        let mut conn = DbConn::acquire(&self.pool)
+            .await
+            .map_err(|e| Self::map_sqlx_error(e, "acquire connection"))?;
         sqlx::query("INSERT INTO audit_outbox (payload) VALUES ($1)")
             .bind(payload)
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await
             .map_err(|e| Self::map_sqlx_error(e, "enqueue audit entry"))?;
 

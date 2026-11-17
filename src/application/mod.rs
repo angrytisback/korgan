@@ -5,6 +5,7 @@
 
 pub mod dto;
 pub mod error;
+pub mod unit_of_work;
 pub mod use_cases;
 pub mod workers;
 

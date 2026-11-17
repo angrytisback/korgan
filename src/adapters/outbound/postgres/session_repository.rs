@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use ipnetwork::IpNetwork;
 use sqlx::PgPool;
 
+use crate::adapters::outbound::postgres::db::DbConn;
 use crate::adapters::outbound::postgres::models::SessionRow;
 use crate::domain::entities::Session;
 use crate::domain::value_objects::{SessionId, TokenFamilyId, UserId};
@@ -23,6 +24,13 @@ impl PostgresSessionRepository {
         Self { pool }
     }
 
+    /// Connection for one repository call (ambient transaction or pooled).
+    async fn conn(&self) -> Result<DbConn, PortError> {
+        DbConn::acquire(&self.pool)
+            .await
+            .map_err(|e| PortError::database(format!("failed to acquire connection: {e}")))
+    }
+
     /// Maps sqlx database errors to standard [`PortError`] values.
     fn map_sqlx_error(e: sqlx::Error, action: &'static str) -> PortError {
         if let Some(db_err) = e.as_database_error()
@@ -40,6 +48,7 @@ impl PostgresSessionRepository {
 #[async_trait]
 impl SessionRepository for PostgresSessionRepository {
     async fn create(&self, session: &Session) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let session_id = session.id.to_uuid();
         let user_id = session.user_id.to_uuid();
         let family_id = session.token_family_id.to_uuid();
@@ -96,7 +105,7 @@ impl SessionRepository for PostgresSessionRepository {
         .bind(session.revoke_reason.as_deref())
         .bind(now)
         .bind(user_id)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "create session"))?;
 
@@ -112,6 +121,7 @@ impl SessionRepository for PostgresSessionRepository {
     }
 
     async fn find_by_id(&self, id: &SessionId) -> Result<Option<Session>, PortError> {
+        let mut conn = self.conn().await?;
         let session_id = id.to_uuid();
 
         let row = sqlx::query_as!(
@@ -136,7 +146,7 @@ impl SessionRepository for PostgresSessionRepository {
             "#,
             session_id
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_by_id"))?;
 
@@ -144,6 +154,7 @@ impl SessionRepository for PostgresSessionRepository {
     }
 
     async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<Session>, PortError> {
+        let mut conn = self.conn().await?;
         let row = sqlx::query_as!(
             SessionRow,
             r#"
@@ -166,7 +177,7 @@ impl SessionRepository for PostgresSessionRepository {
             "#,
             token_hash
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_by_token_hash"))?;
 
@@ -179,6 +190,7 @@ impl SessionRepository for PostgresSessionRepository {
         limit: u32,
         offset: u64,
     ) -> Result<Vec<Session>, PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = user_id.to_uuid();
         let limit_i64 = i64::from(limit);
         let offset_i64 = i64::try_from(offset).unwrap_or(i64::MAX);
@@ -209,7 +221,7 @@ impl SessionRepository for PostgresSessionRepository {
             limit_i64,
             offset_i64
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "list_by_user_id"))?;
 
@@ -217,6 +229,7 @@ impl SessionRepository for PostgresSessionRepository {
     }
 
     async fn update(&self, session: &Session) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let session_id = session.id.to_uuid();
 
         sqlx::query!(
@@ -234,7 +247,7 @@ impl SessionRepository for PostgresSessionRepository {
             session.revoked_at,
             session.revoke_reason.as_deref()
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "update session"))?;
 
@@ -242,6 +255,7 @@ impl SessionRepository for PostgresSessionRepository {
     }
 
     async fn replace_atomic(&self, token_hash: &str) -> Result<Option<Session>, PortError> {
+        let mut conn = self.conn().await?;
         let row = sqlx::query_as::<_, SessionRow>(
             r#"
             UPDATE sessions
@@ -264,7 +278,7 @@ impl SessionRepository for PostgresSessionRepository {
             "#
         )
         .bind(token_hash)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "replace_atomic"))?;
 
@@ -276,6 +290,7 @@ impl SessionRepository for PostgresSessionRepository {
         old_token_hash: &str,
         new_session: &Session,
     ) -> Result<Option<Session>, PortError> {
+        let mut conn = self.conn().await?;
         let new_session_id = new_session.id.to_uuid();
         let new_token_hash = &new_session.refresh_token_hash;
         let user_agent = new_session.user_agent.as_deref();
@@ -376,7 +391,7 @@ impl SessionRepository for PostgresSessionRepository {
         .bind(ip_network)
         .bind(expires_at)
         .bind(created_at)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "rotate_atomic"))?;
 
@@ -384,6 +399,7 @@ impl SessionRepository for PostgresSessionRepository {
     }
 
     async fn revoke_by_id(&self, id: &SessionId, reason: &str) -> Result<(), PortError> {
+        let mut conn = self.conn().await?;
         let session_id = id.to_uuid();
 
         let result = sqlx::query!(
@@ -396,7 +412,7 @@ impl SessionRepository for PostgresSessionRepository {
             session_id,
             reason
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "revoke_by_id"))?;
 
@@ -414,6 +430,7 @@ impl SessionRepository for PostgresSessionRepository {
         user_id: &UserId,
         reason: &str,
     ) -> Result<Option<SessionId>, PortError> {
+        let mut conn = self.conn().await?;
         let session_id = id.to_uuid();
         let user_uuid = user_id.to_uuid();
 
@@ -434,7 +451,7 @@ impl SessionRepository for PostgresSessionRepository {
         .bind(session_id)
         .bind(user_uuid)
         .bind(reason)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "revoke_by_id_and_user_id"))?;
 
@@ -452,6 +469,7 @@ impl SessionRepository for PostgresSessionRepository {
         family_id: &TokenFamilyId,
         reason: &str,
     ) -> Result<Vec<SessionId>, PortError> {
+        let mut conn = self.conn().await?;
         let family_uuid = family_id.to_uuid();
 
         #[derive(sqlx::FromRow)]
@@ -470,7 +488,7 @@ impl SessionRepository for PostgresSessionRepository {
         )
         .bind(family_uuid)
         .bind(reason)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "revoke_family"))?;
 
@@ -489,6 +507,7 @@ impl SessionRepository for PostgresSessionRepository {
         except_session: Option<&SessionId>,
         reason: &str,
     ) -> Result<Vec<SessionId>, PortError> {
+        let mut conn = self.conn().await?;
         let user_uuid = user_id.to_uuid();
         let except_uuid = except_session.map(|s| s.to_uuid());
 
@@ -511,7 +530,7 @@ impl SessionRepository for PostgresSessionRepository {
         .bind(user_uuid)
         .bind(except_uuid)
         .bind(reason)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "revoke_all_user_sessions"))?;
 
@@ -525,6 +544,7 @@ impl SessionRepository for PostgresSessionRepository {
     }
 
     async fn purge_expired(&self, max_purge: u32) -> Result<u64, PortError> {
+        let mut conn = self.conn().await?;
         let max_purge_i64 = i64::from(max_purge);
 
         let row: (i64, i64) = sqlx::query_as(
@@ -546,7 +566,7 @@ impl SessionRepository for PostgresSessionRepository {
             "#,
         )
         .bind(max_purge_i64)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "purge_expired"))?;
 
@@ -559,13 +579,14 @@ impl SessionRepository for PostgresSessionRepository {
     }
 
     async fn count_active(&self) -> Result<u64, PortError> {
+        let mut conn = self.conn().await?;
         let count: i64 = sqlx::query_scalar(
             r#"
             SELECT COUNT(*) FROM sessions
             WHERE revoked_at IS NULL AND is_replaced = false AND expires_at > NOW()
             "#,
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "count_active"))?;
 
