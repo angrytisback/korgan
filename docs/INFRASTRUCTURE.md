@@ -189,13 +189,20 @@ All pool keys are honored at startup (`config/default.toml`, override with `KORG
 ### Background workers (`[workers]`)
 | Key | Default | Meaning |
 | :--- | :--- | :--- |
-| `event_queue_capacity` | `1024` | Bounded queue shared by audit and e-mail events |
+| `event_queue_capacity` | `1024` | Bounded in-memory queue for e-mail events (and for audit events only when the durable outbox is unavailable) |
+| `audit_outbox_batch_size` | `200` | Audit entries moved into the hash chain per transaction |
+| `audit_outbox_poll_ms` | `1000` | Maximum delay before queued audit entries are picked up (also covers other replicas and crash leftovers) |
 | `gc_interval_secs` | `3600` | Retention GC period |
 | `gc_batch_size` | `500` | Rows purged per GC step |
 | `unverified_retention_secs` | `604800` | Age after which never-verified accounts are purged |
 | `shutdown_drain_secs` | `10` | Time allowed for in-flight shielded tasks at shutdown |
 
-Audit events are persisted in order; e-mails are delivered on a bounded pool (8 concurrent, 256 pending, 15 s timeout each), so a slow mail server never delays audit persistence. If the queue is full an event is dropped and counted in `korgan_events_dropped_total{kind,reason}` — alert on any increase.
+Audit events are written to the durable `audit_outbox` table (a single lock-free `INSERT` before the request returns) and chained into the hash-chained `audit_logs` ledger in batches by the background worker, exactly once, even across restarts and replicas. E-mails are delivered on a bounded pool (8 concurrent, 256 pending, 15 s timeout each), so a slow mail server never delays audit persistence. If the outbox itself cannot be written, the event falls back to the in-memory queue; if that is full it is dropped and counted in `korgan_events_dropped_total{kind,reason}`. Alert on any increase of that counter, on `korgan_audit_outbox_enqueue_failures_total`, and on a growing `korgan_audit_outbox_pending` (the chaining backlog). `korgan_audit_outbox_quarantined_total` counts malformed outbox rows that were set aside (never deleted).
+
+Known limit: the outbox write is durable before the request returns but is not in the same SQL transaction as the business change, so a crash in the few milliseconds between the two can lose that single event (see `docs/adr/0005-denetim-icin-transactional-outbox.md`).
+
+### Per-endpoint rate limits
+In addition to the global budget, `POST /auth/register`, `POST /password/forgot` and `POST /auth/mfa/verify` have their own per-client buckets (`rate_limit.register_max_requests`, `forgot_password_max_requests`, `mfa_max_requests`, default 5 / 5 / 10 per `window_secs`); login is limited by `login_max_requests`. Exceeding a budget returns `429` with `Retry-After`; a Redis failure returns `503` (fail-closed). Behind a reverse proxy set `rate_limit.trust_proxy_headers = true`, otherwise every client shares one bucket.
 
 ### Health probes and metrics
 - `/health`, `/health/live`, `/health/ready` and `/metrics` bypass the Redis rate limiter. Liveness therefore stays `200` during a Redis outage; readiness returns `503` when PostgreSQL or Redis is unreachable.
@@ -205,7 +212,7 @@ Audit events are persisted in order; e-mails are delivered on a bounded pool (8 
 On `SIGTERM`/`SIGINT` Korgan stops accepting connections, waits up to `server.shutdown_grace_secs` for in-flight requests, drains shielded tasks (`workers.shutdown_drain_secs`), then signals and joins the workers. Workers are drained even if the server itself failed, and a worker that terminated abnormally makes the process exit with a non-zero code.
 
 ### Database migrations
-Migrations are **not** executed at startup. Apply them explicitly with `cargo sqlx migrate run` before starting a new version. The `database.run_migrations` key is currently accepted but has no effect (tracked in `.agent/reports/DECISIONS_NEEDED.md`).
+With `database.run_migrations = true` (the default) the SQL migrations embedded in the binary are applied at startup, before the server or any CLI command touches the database. `sqlx` holds a PostgreSQL advisory lock while migrating, so several replicas starting together serialize safely. The database user needs DDL privileges for this; if migrations are applied by a separate, privileged release step, set `database.run_migrations = false` and run `cargo sqlx migrate run` instead. Modifying an already-applied migration file makes startup fail with a checksum error (intended).
 
 ### Build requirements
 Minimum supported Rust version: **1.94** (`rust-version` in `Cargo.toml`, enforced by the CI `msrv` job).
