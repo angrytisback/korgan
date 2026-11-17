@@ -43,6 +43,9 @@ max_connections = 20
 min_connections = 2
 acquire_timeout_secs = 5
 idle_timeout_secs = 600
+# Apply the embedded SQL migrations at startup (safe with several replicas:
+# sqlx serializes them with a PostgreSQL advisory lock). Set to false when
+# migrations are applied by a separate release step.
 run_migrations = true
 # Server-side statement_timeout for every pooled connection (0 disables it).
 statement_timeout_secs = 15
