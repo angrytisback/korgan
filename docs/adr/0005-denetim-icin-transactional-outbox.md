@@ -15,11 +15,11 @@ Denetim defteri hash zincirli, değişmez ve "eksiksiz" olarak tanıtılıyor. A
 
 ## Alternatifler
 - Audit için `send().await` (backpressure): istek gecikmesi zincir hızına bağlanır, çökmeye karşı koruma yok.
-- Olayı iş işlemiyle **aynı SQL transaction'ında** yazmak: use case'ler birden çok repository'e yayıldığı için port imzalarının ve ~32 use case'in yeniden tasarlanmasını gerektirir. Yapılmadı.
+- Olayı iş işlemiyle **aynı SQL transaction'ında** yazmak: başlangıçta ertelendi; ardından kullanıcı kararıyla uygulandı, bkz. [ADR 0009](0009-unit-of-work-ve-atomik-denetim.md).
 
 ## Sonuçlar
 - (+) Kabul edilmiş bir denetim olayı dolu kuyruk, yeniden başlatma veya çökme yüzünden kaybolmaz (gerçek PostgreSQL 17 ile doğrulandı: eşzamanlı üretici/tüketici, tam-bir-kez zincirleme, yeniden başlatma, karantina, kapasite-1 kuyrukla uçtan uca).
 - (+) Zincir yazımı batch'lendiği için kilit baskısı azalır; HA'da her replika kuyruğu boşaltabilir.
-- (−) **Garanti sınırı:** enqueue, istek dönmeden önce kalıcıdır ancak iş değişikliğiyle aynı SQL transaction'ında değildir. İş commit edildikten sonra ve enqueue'dan önce süreç ölürse o tek olay kaybolabilir (pencere milisaniyeler). Tam atomiklik için bkz. alternatifler.
+- (+) **Atomiklik:** PG mutasyonu anlatan olaylar [ADR 0009](0009-unit-of-work-ve-atomik-denetim.md) ile iş değişikliğiyle aynı SQL transaction'ında yazılır; commit ile enqueue arasındaki boşluk kapandı. PG mutasyonu olmayan olaylar (hız sınırı, Redis-only akışlar) bağımsız `record_audit` ile kalıcı yazılır.
 - (−) Outbox DB'ye bağlıdır: DB yokken yedek yol bellek içi kuyruktur (eski best-effort davranış).
 - (−) Yeni tablo: `run_migrations = false` ise sürümle birlikte migrasyon elle uygulanmalıdır; uygulanmazsa enqueue başarısız olur ve yedek yol devreye girer (hata loglanır).

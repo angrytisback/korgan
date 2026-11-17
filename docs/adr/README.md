@@ -7,6 +7,7 @@
 | [0003](0003-probe-rotalari-rate-limit-disi.md) | Probe rotaları rate limiter dışında | Kabul edildi |
 | [0004](0004-worker-yasam-dongusu-ve-kapanis.md) | Worker yaşam döngüsü ve kapanış sırası | Kabul edildi |
 | [0005](0005-denetim-icin-transactional-outbox.md) | Denetim teslim garantisi için transactional outbox | Kabul edildi, uygulandı |
-| [0006](0006-kompozisyon-kokunun-tasinmasi.md) | Kompozisyon kökünün `bootstrap` modülüne taşınması | Kabul edildi, 1. adım uygulandı |
+| [0006](0006-kompozisyon-kokunun-tasinmasi.md) | Kompozisyon kökünün `bootstrap` modülüne taşınması | Kabul edildi, 1. ve 2. adım uygulandı |
 | [0007](0007-acilista-gomulu-migrasyon.md) | Açılışta gömülü migrasyon | Kabul edildi |
 | [0008](0008-uc-basina-rate-limit.md) | Uç başına rate limit | Kabul edildi |
+| [0009](0009-unit-of-work-ve-atomik-denetim.md) | Unit of work ve atomik denetim | Kabul edildi |
