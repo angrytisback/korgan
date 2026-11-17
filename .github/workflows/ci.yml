@@ -85,7 +85,8 @@ jobs:
           tool: cargo-audit,cargo-deny
 
       - name: Scan Cargo.lock for CVEs and yanked crates
-        run: cargo audit --deny warnings
+        # RUSTSEC-2026-0543: chrono "unmaintained" (see the justification in deny.toml).
+        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0543
 
       - name: Check supply-chain bans, licenses, and advisories
         run: cargo deny check
