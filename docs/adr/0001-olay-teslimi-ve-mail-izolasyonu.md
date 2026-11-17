@@ -18,5 +18,5 @@ Tüm yan etkiler (denetim kaydı, doğrulama/sıfırlama e-postası) tek bir bou
 ## Sonuçlar
 - (+) Yavaş mail sunucusu denetim yazımını geciktirmez (test: `stalled_mail_provider_does_not_block_audit_persistence`).
 - (+) Kayıp artık görünür ve alarmlanabilir.
-- (−) Denetim kuyruğu dolarsa olay hâlâ düşer. Tam garanti için bkz. [ADR 0005](0005-denetim-icin-transactional-outbox.md).
+- (−) Bu ADR tek başına denetim kaybını engellemez; o kısım [ADR 0005](0005-denetim-icin-transactional-outbox.md) ile çözüldü (denetim olayları artık kalıcı outbox'tan geçer, bellek içi kuyruk yalnızca yedektir).
 - (−) E-posta sırası artık garanti edilmez (zaten gerekli değildi).

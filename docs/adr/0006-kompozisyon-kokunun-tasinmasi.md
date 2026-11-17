@@ -1,13 +1,15 @@
 # ADR 0006 — Kompozisyon kökünün `bootstrap` modülüne taşınması
 
-Durum: **Önerildi — karar bekliyor** · Kusur: A-10
+Durum: **Kabul edildi; 1. adım uygulandı** · Kusur: A-10
 
 ## Bağlam
-`adapters/inbound/http/state.rs` (~700 satır) tüm outbound adaptörleri kurar, 20 argümanlı `with_ports` ile ~35 use case'i bağlar ve tüm alanlarını `pub` açar. Kompozisyon kökü bir inbound adaptörün içinde olduğu için CLI ve test kurulumları HTTP katmanına bağımlıdır; "tanrı struct" değişikliği zorlaştırır.
+`adapters/inbound/http/state.rs` (717 satır) tüm outbound adaptörleri kuruyor, 20 argümanlı `with_ports` ile ~35 use case'i bağlıyor ve alanlarını `pub` açıyordu. Kompozisyon kökü bir inbound adaptörün içinde olduğu için CLI ve test kurulumları HTTP katmanına bağımlıydı.
 
-## Önerilen karar
-`src/bootstrap/` oluştur: pool/adaptör kurulumu (`build_pg_pool` ve `build_redis_pool` zaten ayrı fonksiyonlar), use case bağlama ve worker başlatma burada olsun; `AppState` yalnızca handler'ların ihtiyaç duyduğu use case'leri taşısın. Kademeli yapılabilir: önce fonksiyonları taşı, sonra alanları daralt.
+## Karar (kademeli)
+1. **Yapıldı:** Adaptör kurulumu (`build_pg_pool`, `build_redis_pool`, repository'ler, kripto, mail, OAuth, worker) `src/bootstrap.rs` içine taşındı; `AppState::from_settings` yerine `bootstrap::build_state` geldi. Inbound HTTP adaptörü artık hiçbir outbound adaptörü import etmiyor (referans sayısı ~25 → 0) ve `state.rs` 717 → 434 satıra indi. `AppState`, `with_ports` ve handler imzaları değişmedi.
+2. **Bilinçli olarak yapılmadı:** `AppState`'in alanlarının daraltılması ve `with_ports`'taki use case bağlamanın `bootstrap`'e alınması. Handler'ların ~35 `state.xxx_use_case` erişimini değiştirir; ayrı bir karar/PR olarak ele alınmalıdır.
 
 ## Sonuçlar
-- (+) Katman sınırları netleşir, test kurulumu sadeleşir.
-- (−) Geniş bir yapısal taşıma; "komple mimari değişiklik" kapsamına girebileceği için konuşulmadan yapılmadı.
+- (+) Katman sınırı net: bileşim kökü tek yerde (`bootstrap`), HTTP katmanı yalnızca portlara bağlı.
+- (+) Boot ile ilgili işler (migrasyon, havuz) için doğal bir yer oluştu (`bootstrap::run_migrations`).
+- (−) `AppState` hâlâ geniş bir struct; 2. adım yapılana kadar "tanrı struct" olarak kalır.

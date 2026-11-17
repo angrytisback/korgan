@@ -14,4 +14,4 @@ Durum: Kabul edildi · Kusurlar: A-04, A-07, A-15 (kısmen)
 ## Sonuçlar
 - (+) Belgelenen her anahtar gerçekten bir şey yapar; yanlış güvenlik varsayımı kalmaz.
 - (−) Davranış değişikliği: `statement_timeout` varsayılan 15 sn. 15 sn'den uzun süren sorgular artık iptal edilir (GC batch'leri 500 satırdır; ölçülmedi).
-- (−) `register_max_requests`, `forgot_password_max_requests`, `mfa_max_requests` hâlâ uygulanmıyor: yeni kısıtlama getireceği için karar bekliyor (`DECISIONS_NEEDED.md`).
+- Uç başı rate limit anahtarları için bkz. [ADR 0008](0008-uc-basina-rate-limit.md); `run_migrations` için bkz. [ADR 0007](0007-acilista-gomulu-migrasyon.md).
