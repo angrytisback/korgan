@@ -747,3 +747,116 @@ async fn bench_audit_paths() -> TestResult {
 
     db.drop_db().await
 }
+
+/// Two independent "replicas" (own pools, buses and workers) share one database:
+/// both produce and both drain the same outbox concurrently. Every entry must be
+/// chained exactly once and the hash chain must stay unbroken.
+#[tokio::test]
+#[ignore = "needs KORGAN_TEST_DATABASE_URL"]
+async fn two_replicas_drain_one_outbox_without_loss_duplication_or_chain_forks() -> TestResult {
+    use korgan::adapters::outbound::mail::ConsoleMailProvider;
+    use korgan::application::workers::EventWorker;
+
+    let db = TestDb::create().await?;
+    korgan::bootstrap::run_migrations(&db.pool).await?;
+    let options = db.pool.connect_options().as_ref().clone();
+
+    struct Replica {
+        bus: EventBus,
+        stop: tokio::sync::watch::Sender<bool>,
+        worker: tokio::task::JoinHandle<()>,
+        repo: std::sync::Arc<PostgresAuditLogRepository>,
+    }
+
+    async fn start(
+        options: &sqlx::postgres::PgConnectOptions,
+    ) -> Result<Replica, Box<dyn std::error::Error>> {
+        let pool = PgPoolOptions::new()
+            .max_connections(6)
+            .connect_with(options.clone())
+            .await?;
+        let repo = std::sync::Arc::new(PostgresAuditLogRepository::new(pool.clone()));
+        let (bus, rx) = EventBus::new(8);
+        let bus = bus
+            .with_audit_outbox(repo.clone())
+            .with_unit_of_work(std::sync::Arc::new(PostgresUnitOfWork::new(pool)));
+        let worker = EventWorker::new(
+            rx,
+            std::sync::Arc::new(ConsoleMailProvider::new("noreply@example.test")),
+            repo.clone(),
+            "https://example.test".to_owned(),
+        )
+        .with_audit_outbox(
+            repo.clone(),
+            bus.audit_outbox_wake(),
+            13, // small batches force many interleaved drain transactions
+            std::time::Duration::from_millis(50),
+        );
+        let (stop, stop_rx) = tokio::sync::watch::channel(false);
+        let worker = tokio::spawn(worker.run(stop_rx));
+        Ok(Replica {
+            bus,
+            stop,
+            worker,
+            repo,
+        })
+    }
+
+    let a = start(&options).await?;
+    let b = start(&options).await?;
+
+    let mut producers = Vec::new();
+    for (replica, offset) in [(&a, 0u32), (&b, 1_000u32)] {
+        for p in 0..4u32 {
+            let bus = replica.bus.clone();
+            producers.push(tokio::spawn(async move {
+                for i in 0..25u32 {
+                    bus.record_audit(entry(offset + p * 25 + i)).await;
+                }
+            }));
+        }
+    }
+    for task in producers {
+        task.await?;
+    }
+
+    // 2 replicas x 4 producers x 25 entries.
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if a.repo.count_all().await.unwrap_or(0) == 200
+                && a.repo.pending().await.unwrap_or(1) == 0
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| "replicas did not chain all entries in time")?;
+
+    for replica in [&a, &b] {
+        replica.stop.send(true)?;
+    }
+    for replica in [a, b] {
+        replica.worker.await?;
+    }
+
+    let probe = PostgresAuditLogRepository::new(db.pool.clone());
+    assert_eq!(probe.pending().await?, 0);
+    assert_chain_valid(&probe, 200).await?;
+    let distinct: i64 = sqlx::query_scalar("SELECT count(DISTINCT id) FROM audit_logs")
+        .fetch_one(&db.pool)
+        .await?;
+    assert_eq!(distinct, 200, "an entry was chained twice or lost");
+    let forked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (SELECT prev_hash FROM audit_logs GROUP BY prev_hash HAVING count(*) > 1) t",
+    )
+    .fetch_one(&db.pool)
+    .await?;
+    assert_eq!(
+        forked, 0,
+        "two entries share a predecessor: the chain forked"
+    );
+
+    db.drop_db().await
+}
