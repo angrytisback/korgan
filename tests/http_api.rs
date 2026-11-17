@@ -1991,7 +1991,7 @@ async fn test_rate_limit_ip_spoofing_via_x_forwarded_for() -> TestResult {
     // intermediate proxy (2.2.2.2), rightmost is trusted reverse proxy client IP (198.51.100.42)
     let req = Request::builder()
         .method(Method::GET)
-        .uri("/health/live")
+        .uri("/.well-known/jwks.json")
         .header("X-Forwarded-For", "1.1.1.1, 2.2.2.2, 198.51.100.42")
         .body(Body::empty())?;
 
@@ -2027,7 +2027,7 @@ async fn test_rate_limit_fail_closed_on_redis_error() -> TestResult {
 
     let req = Request::builder()
         .method(Method::GET)
-        .uri("/health/live")
+        .uri("/.well-known/jwks.json")
         .body(Body::empty())?;
 
     let res = send_request(&app, req).await?;
@@ -2036,6 +2036,48 @@ async fn test_rate_limit_fail_closed_on_redis_error() -> TestResult {
     let bytes = to_bytes(res.into_body(), 64 * 1024).await?;
     let problem: ProblemDetails = serde_json::from_slice(&bytes)?;
     assert_eq!(problem.status, 503);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_probe_routes_bypass_rate_limiter_when_redis_is_down() -> TestResult {
+    struct FailingRateLimiter;
+    #[async_trait]
+    impl RateLimiterPort for FailingRateLimiter {
+        async fn check_and_increment(
+            &self,
+            _key: &str,
+            _limit: u32,
+            _window: Duration,
+        ) -> Result<RateLimitStatus, PortError> {
+            Err(PortError::cache("redis connection timed out"))
+        }
+        async fn reset(&self, _key: &str) -> Result<(), PortError> {
+            Ok(())
+        }
+    }
+
+    let app = setup_test_app_with_rate_limiter(Arc::new(FailingRateLimiter), false)?;
+
+    // Liveness must never depend on Redis, otherwise a cache outage makes the
+    // orchestrator restart every healthy pod.
+    for uri in ["/health", "/health/live", "/metrics"] {
+        let req = Request::builder().uri(uri).body(Body::empty())?;
+        let res = send_request(&app, req).await?;
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "{uri} must bypass the limiter"
+        );
+    }
+
+    // Regular routes stay fail-closed.
+    let req = Request::builder()
+        .uri("/.well-known/jwks.json")
+        .body(Body::empty())?;
+    let res = send_request(&app, req).await?;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     Ok(())
 }

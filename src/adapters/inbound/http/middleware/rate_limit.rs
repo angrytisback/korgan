@@ -16,6 +16,17 @@ pub static RATELIMIT_LIMIT: HeaderName = HeaderName::from_static("ratelimit-limi
 pub static RATELIMIT_REMAINING: HeaderName = HeaderName::from_static("ratelimit-remaining");
 pub static RATELIMIT_RESET: HeaderName = HeaderName::from_static("ratelimit-reset");
 
+/// Paths served by infrastructure probes and scrapers.
+///
+/// They must not depend on Redis (a cache outage would otherwise fail liveness
+/// and make the orchestrator restart healthy pods) nor consume the per-IP
+/// request budget of the probing host.
+const EXEMPT_PATHS: [&str; 4] = ["/health", "/health/live", "/health/ready", "/metrics"];
+
+fn is_exempt_path(path: &str) -> bool {
+    EXEMPT_PATHS.contains(&path)
+}
+
 /// Extracts client IP address from connect info or headers.
 fn extract_client_ip(request: &Request, trust_proxy: bool) -> IpAddr {
     if trust_proxy {
@@ -50,7 +61,7 @@ pub async fn rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    if !state.settings.rate_limit.enabled {
+    if !state.settings.rate_limit.enabled || is_exempt_path(request.uri().path()) {
         return next.run(request).await;
     }
 
