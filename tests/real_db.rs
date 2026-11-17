@@ -590,3 +590,160 @@ async fn audited_reuses_one_connection_and_scales_under_concurrency() -> TestRes
     tiny.close().await;
     db.drop_db().await
 }
+
+// ---------------------------------------------------------------------------
+// Benchmark (not a pass/fail test): cost of the audit paths on a real database.
+//
+//   KORGAN_TEST_DATABASE_URL=... cargo test --release --test real_db \
+//       bench_audit_paths -- --ignored --nocapture
+// ---------------------------------------------------------------------------
+
+fn percentile(sorted: &[std::time::Duration], p: f64) -> f64 {
+    let idx = ((sorted.len() as f64 * p) as usize).min(sorted.len().saturating_sub(1));
+    sorted.get(idx).map_or(0.0, |d| d.as_secs_f64() * 1000.0)
+}
+
+#[allow(clippy::print_stderr)]
+fn report(label: &str, mut samples: Vec<std::time::Duration>, wall: std::time::Duration) {
+    samples.sort();
+    eprintln!(
+        "{label:<46} n={:<5} ops/s={:<8.0} p50={:.2}ms p95={:.2}ms p99={:.2}ms",
+        samples.len(),
+        samples.len() as f64 / wall.as_secs_f64(),
+        percentile(&samples, 0.50),
+        percentile(&samples, 0.95),
+        percentile(&samples, 0.99),
+    );
+}
+
+/// Runs `op` `total` times with `concurrency` parallel workers.
+async fn measure<F, Fut>(
+    total: u32,
+    concurrency: u32,
+    op: F,
+) -> (Vec<std::time::Duration>, std::time::Duration)
+where
+    F: Fn(u32) -> Fut + Clone + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let started = std::time::Instant::now();
+    let per_worker = total / concurrency;
+    let workers: Vec<_> = (0..concurrency)
+        .map(|w| {
+            let op = op.clone();
+            tokio::spawn(async move {
+                let mut samples = Vec::with_capacity(per_worker as usize);
+                for i in 0..per_worker {
+                    let t0 = std::time::Instant::now();
+                    op(w * per_worker + i).await;
+                    samples.push(t0.elapsed());
+                }
+                samples
+            })
+        })
+        .collect();
+    let mut all = Vec::new();
+    for w in workers {
+        if let Ok(samples) = w.await {
+            all.extend(samples);
+        }
+    }
+    (all, started.elapsed())
+}
+
+#[tokio::test]
+#[ignore = "benchmark; needs KORGAN_TEST_DATABASE_URL"]
+#[allow(clippy::print_stderr)]
+async fn bench_audit_paths() -> TestResult {
+    let db = TestDb::create().await?;
+    korgan::bootstrap::run_migrations(&db.pool).await?;
+    let audit = std::sync::Arc::new(PostgresAuditLogRepository::new(db.pool.clone()));
+    let users = std::sync::Arc::new(PostgresUserRepository::new(db.pool.clone()));
+    let (bus, _rx) = EventBus::new(8);
+    let bus = bus
+        .with_audit_outbox(audit.clone())
+        .with_unit_of_work(std::sync::Arc::new(PostgresUnitOfWork::new(
+            db.pool.clone(),
+        )));
+
+    for concurrency in [1u32, 16] {
+        eprintln!("--- concurrency {concurrency} ---");
+
+        // Old path: one transaction + global advisory lock + chaining per event.
+        let a = audit.clone();
+        let (s, w) = measure(1600, concurrency, move |n| {
+            let a = a.clone();
+            async move {
+                let mut e = entry(n);
+                let _ = a.append_and_chain(&mut e).await;
+            }
+        })
+        .await;
+        report("legacy append_and_chain (lock+chain per event)", s, w);
+
+        // New path: lock-free INSERT into the outbox.
+        let a = audit.clone();
+        let (s, w) = measure(1600, concurrency, move |n| {
+            let a = a.clone();
+            async move {
+                let _ = a.enqueue(&entry(n)).await;
+            }
+        })
+        .await;
+        report("outbox enqueue (what the request pays)", s, w);
+
+        // State change alone vs state change + atomic audit.
+        let u = users.clone();
+        let base = 1_000_000 * concurrency;
+        let (s, w) = measure(800, concurrency, move |n| {
+            let u = u.clone();
+            async move {
+                let user = match new_user(base + n) {
+                    Ok(user) => user,
+                    Err(_) => return,
+                };
+                let _ = u.create(&user).await;
+            }
+        })
+        .await;
+        report("create user only (no audit)", s, w);
+
+        let (u, b) = (users.clone(), bus.clone());
+        let base = 2_000_000 * concurrency;
+        let (s, w) = measure(800, concurrency, move |n| {
+            let (u, b) = (u.clone(), b.clone());
+            async move {
+                let user = match new_user(base + n) {
+                    Ok(user) => user,
+                    Err(_) => return,
+                };
+                let _ = b
+                    .audited(
+                        async {
+                            u.create(&user).await?;
+                            Ok::<(), AppError>(())
+                        },
+                        entry(n),
+                    )
+                    .await;
+            }
+        })
+        .await;
+        report("create user + atomic audit (audited)", s, w);
+    }
+
+    // Background chaining throughput of the worker side.
+    let pending = audit.pending().await?;
+    let t0 = std::time::Instant::now();
+    while audit.pending().await? > 0 {
+        audit.drain(200).await?;
+    }
+    let secs = t0.elapsed().as_secs_f64();
+    eprintln!(
+        "--- drain: {pending} queued entries chained in {secs:.2}s = {:.0} entries/s (batch 200, single drainer) ---",
+        pending as f64 / secs
+    );
+    assert_chain_valid(&audit, usize::try_from(audit.count_all().await?)?).await?;
+
+    db.drop_db().await
+}
