@@ -5,7 +5,7 @@ export SQLX_OFFLINE := true
 # Keep in sync with `rust-version` in Cargo.toml.
 MSRV := 1.94
 
-.PHONY: help build test test-arm64 test-db bench-db lint fmt fmt-check doc boundaries audit msrv check run
+.PHONY: help build test test-arm64 build-arm64-musl test-db bench-db lint fmt fmt-check doc boundaries audit msrv check run
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST)
@@ -19,6 +19,9 @@ test: ## Run the full test suite (in-memory fakes, no Postgres/Redis needed)
 
 test-arm64: ## Run the test suite for aarch64 under qemu-user via `cross` (needs Docker, see Cross.toml)
 	cross test --locked --target aarch64-unknown-linux-gnu
+
+build-arm64-musl: ## Static aarch64 musl release binary via `cross` (builds a target OpenSSL in the cross image, see Cross.toml)
+	OPENSSL_DIR=/opt/openssl-arm64-musl OPENSSL_STATIC=1 cross build --locked --release --target aarch64-unknown-linux-musl
 
 test-db: ## Tests against a real PostgreSQL (set KORGAN_TEST_DATABASE_URL, see tests/real_db.rs)
 	@test -n "$$KORGAN_TEST_DATABASE_URL" || { echo "set KORGAN_TEST_DATABASE_URL"; exit 1; }

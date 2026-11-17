@@ -12,4 +12,17 @@ pre-build = [
 ]
 
 [build.env]
-passthrough = ["SQLX_OFFLINE"]
+passthrough = ["SQLX_OFFLINE", "OPENSSL_DIR", "OPENSSL_STATIC"]
+
+# Static musl arm64 release binary (what the Dockerfile builds on a native arm64
+# builder). The cross image has no target OpenSSL, so a static one is built first
+# (downloaded and built inside the container only).
+#   OPENSSL_DIR=/opt/openssl-arm64-musl OPENSSL_STATIC=1 \
+#   cross build --locked --release --target aarch64-unknown-linux-musl
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
+pre-build = [
+    "curl -fsSL https://github.com/openssl/openssl/releases/download/openssl-3.0.15/openssl-3.0.15.tar.gz -o /tmp/openssl.tgz",
+    "mkdir -p /tmp/openssl-src && tar -xzf /tmp/openssl.tgz -C /tmp/openssl-src --strip-components=1",
+    "cd /tmp/openssl-src && ./Configure linux-aarch64 no-shared no-tests --prefix=/opt/openssl-arm64-musl --openssldir=/opt/openssl-arm64-musl CC=aarch64-unknown-linux-musl-gcc AR=aarch64-unknown-linux-musl-ar && make -j$(nproc) build_libs && make install_dev",
+]
