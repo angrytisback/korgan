@@ -1,6 +1,6 @@
 //! Self-validating, canonicalized e-mail address value object.
 //!
-//! Validates against RFC rules using [`validator::validate_email`] and
+//! Validates against RFC rules using `validator::validate_email` and
 //! silently normalizes to lowercase upon instantiation.
 
 use std::fmt;

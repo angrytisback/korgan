@@ -30,7 +30,7 @@ impl WebauthnRsAdapter {
     ///
     /// # Errors
     ///
-    /// Returns [`PortError::external`] if the origin cannot be parsed or Relying Party setup fails.
+    /// Returns a [`PortError`] if the origin cannot be parsed or Relying Party setup fails.
     pub fn new(rp_id: &str, rp_origin: &str) -> Result<Self, PortError> {
         let origin_url = Url::parse(rp_origin).map_err(|e| {
             PortError::external_service(
