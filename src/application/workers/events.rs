@@ -10,7 +10,9 @@ use crate::domain::entities::AuditLog;
 use crate::domain::value_objects::EmailAddress;
 
 /// Security and lifecycle events emitted during use case execution.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented by hand so single-use tokens never reach logs.
+#[derive(Clone)]
 pub enum AppEvent {
     /// Dispatches an account confirmation e-mail with a single-use token.
     SendVerificationEmail {
@@ -30,6 +32,24 @@ pub enum AppEvent {
 
     /// Persists an immutable security audit trail entry.
     LogAudit(Box<AuditLog>),
+}
+
+impl std::fmt::Debug for AppEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SendVerificationEmail { to, .. } => f
+                .debug_struct("SendVerificationEmail")
+                .field("to", to)
+                .field("token", &"<redacted>")
+                .finish(),
+            Self::SendPasswordResetEmail { to, .. } => f
+                .debug_struct("SendPasswordResetEmail")
+                .field("to", to)
+                .field("token", &"<redacted>")
+                .finish(),
+            Self::LogAudit(entry) => f.debug_tuple("LogAudit").field(entry).finish(),
+        }
+    }
 }
 
 /// Asynchronous event bus handle backed by a bounded MPSC channel.
@@ -76,5 +96,35 @@ impl EventBus {
     /// Returns [`mpsc::error::SendError`] if the receiver has shut down.
     pub async fn send(&self, event: AppEvent) -> Result<(), mpsc::error::SendError<AppEvent>> {
         self.sender.send(event).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECRET: &str = "s3cr3t-token-value";
+
+    fn recipient() -> Result<EmailAddress, Box<dyn std::error::Error>> {
+        Ok(EmailAddress::parse("user@example.com")?)
+    }
+
+    #[test]
+    fn debug_output_never_contains_single_use_tokens() -> Result<(), Box<dyn std::error::Error>> {
+        let events = [
+            AppEvent::SendVerificationEmail {
+                to: recipient()?,
+                token: SECRET.to_owned(),
+            },
+            AppEvent::SendPasswordResetEmail {
+                to: recipient()?,
+                token: SECRET.to_owned(),
+            },
+        ];
+        for event in &events {
+            let rendered = format!("{event:?}");
+            assert!(!rendered.contains(SECRET), "token leaked: {rendered}");
+        }
+        Ok(())
     }
 }
