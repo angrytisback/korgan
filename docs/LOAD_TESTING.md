@@ -96,7 +96,7 @@ docker exec kg-pg psql -U korgan -d korgan_load \
 
 ## 4. Not measured
 
-* Multi-replica behaviour (two Korgan processes draining one outbox).
+* Multi-replica behaviour under load (correctness with two replicas is covered by `two_replicas_drain_one_outbox_...` in `tests/real_db.rs`).
 * Sustained multi-hour soak, memory growth, connection-pool saturation behaviour.
 * Production-like PostgreSQL (replication, remote storage) and network latency.
 * Variance between runs (one run per scenario).
