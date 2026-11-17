@@ -519,7 +519,7 @@ pub struct OAuthClientSettings {
 pub struct WebauthnSettings {
     /// Relying Party identifier (e.g. "localhost" or domain name).
     pub rp_id: String,
-    /// Relying Party origin (e.g. "http://localhost:8080" or "https://auth.example.com").
+    /// Relying Party origin (e.g. `http://localhost:8080` or `https://auth.example.com`).
     pub rp_origin: String,
 }
 

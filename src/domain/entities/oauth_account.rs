@@ -59,7 +59,7 @@ impl FromStr for OAuthProvider {
     }
 }
 
-/// Links an internal [`User`] account to an external Identity Provider account.
+/// Links an internal [`User`](crate::domain::entities::User) account to an external Identity Provider account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthAccount {
     /// Unique identifier for this linkage record (RFC 9562 UUIDv7).
