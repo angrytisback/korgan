@@ -34,6 +34,23 @@ use crate::ports::services::{
     TotpService, WebAuthnService,
 };
 
+/// SQL migrations embedded into the binary at compile time.
+pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// Applies all pending embedded migrations.
+///
+/// `sqlx` holds a PostgreSQL advisory lock while migrating, so several
+/// replicas starting at the same time serialize safely: one applies the
+/// migrations, the others find nothing left to do.
+///
+/// # Errors
+///
+/// Returns an error if the database is unreachable, a migration fails, or an
+/// already-applied migration was modified.
+pub async fn run_migrations(pool: &sqlx::PgPool) -> Result<(), sqlx::migrate::MigrateError> {
+    MIGRATOR.run(pool).await
+}
+
 /// Boxed error returned while assembling the application.
 pub type BootError = Box<dyn std::error::Error + Send + Sync>;
 

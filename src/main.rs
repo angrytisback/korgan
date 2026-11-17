@@ -51,6 +51,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let (state, mut worker) =
         korgan::bootstrap::build_state(settings.clone()).map_err(|e| e as Box<dyn Error>)?;
 
+    // Bring the schema up to date before anything touches the database.
+    if settings.database.run_migrations {
+        tracing::info!("applying database migrations");
+        korgan::bootstrap::run_migrations(&state.pg_pool).await?;
+    }
+
     // Handle CLI subcommands if supplied
     match cli.command {
         Some(Commands::Bootstrap { email, password }) => {
