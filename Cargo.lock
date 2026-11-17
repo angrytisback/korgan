@@ -1867,7 +1867,6 @@ dependencies = [
  "deadpool-redis",
  "dotenvy",
  "ed25519-dalek",
- "hmac",
  "http",
  "ipnetwork",
  "lettre",
