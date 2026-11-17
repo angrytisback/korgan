@@ -67,12 +67,70 @@ pub async fn rate_limit_middleware(
 
     let client_ip = extract_client_ip(&request, state.settings.rate_limit.trust_proxy_headers);
     let key = format!("http_rl:{client_ip}");
-
     let limit = state.settings.rate_limit.global_max_requests;
+    enforce(&state, request, next, &key, limit).await
+}
+
+/// Endpoints with their own, stricter per-client budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointLimit {
+    /// Account registration (`rate_limit.register_max_requests`).
+    Register,
+    /// Forgot-password requests (`rate_limit.forgot_password_max_requests`).
+    ForgotPassword,
+    /// MFA code verification (`rate_limit.mfa_max_requests`).
+    MfaVerify,
+}
+
+impl EndpointLimit {
+    const fn bucket(self) -> &'static str {
+        match self {
+            Self::Register => "register",
+            Self::ForgotPassword => "forgot_password",
+            Self::MfaVerify => "mfa_verify",
+        }
+    }
+
+    const fn budget(self, settings: &crate::config::RateLimitSettings) -> u32 {
+        match self {
+            Self::Register => settings.register_max_requests,
+            Self::ForgotPassword => settings.forgot_password_max_requests,
+            Self::MfaVerify => settings.mfa_max_requests,
+        }
+    }
+}
+
+/// Per-endpoint sliding-window limit, applied in addition to the global one.
+///
+/// Fails closed (503) when the limiter backend errors, like the global limiter.
+pub async fn endpoint_rate_limit_middleware(
+    State((state, endpoint)): State<(AppState, EndpointLimit)>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !state.settings.rate_limit.enabled {
+        return next.run(request).await;
+    }
+
+    let client_ip = extract_client_ip(&request, state.settings.rate_limit.trust_proxy_headers);
+    let key = format!("ep_rl:{}:{client_ip}", endpoint.bucket());
+    let limit = endpoint.budget(&state.settings.rate_limit);
+    enforce(&state, request, next, &key, limit).await
+}
+
+/// Consumes one unit of `key`'s budget and either rejects (429/503) or
+/// forwards the request, adding the `RateLimit-*` headers.
+async fn enforce(
+    state: &AppState,
+    request: Request,
+    next: Next,
+    key: &str,
+    limit: u32,
+) -> Response {
     let window = Duration::from_secs(state.settings.rate_limit.window_secs);
     let rate_status = match state
         .rate_limiter
-        .check_and_increment(&key, limit, window)
+        .check_and_increment(key, limit, window)
         .await
     {
         Ok(status) => status,

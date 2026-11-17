@@ -2082,6 +2082,120 @@ async fn test_probe_routes_bypass_rate_limiter_when_redis_is_down() -> TestResul
     Ok(())
 }
 
+/// Records every limiter call and rejects keys that contain `deny`.
+#[derive(Default)]
+struct EndpointSpyLimiter {
+    calls: Mutex<Vec<(String, u32)>>,
+    deny: Option<&'static str>,
+}
+
+#[async_trait]
+impl RateLimiterPort for EndpointSpyLimiter {
+    async fn check_and_increment(
+        &self,
+        key: &str,
+        limit: u32,
+        _window: Duration,
+    ) -> Result<RateLimitStatus, PortError> {
+        self.calls
+            .lock()
+            .map_err(|e| PortError::cache(e.to_string()))?
+            .push((key.to_owned(), limit));
+        let denied = self.deny.is_some_and(|needle| key.contains(needle));
+        Ok(RateLimitStatus {
+            allowed: !denied,
+            limit,
+            remaining: 0,
+            reset_epoch_secs: 0,
+            retry_after_secs: denied.then_some(30),
+        })
+    }
+
+    async fn reset(&self, _key: &str) -> Result<(), PortError> {
+        Ok(())
+    }
+}
+
+fn post_json(uri: &str) -> Result<Request<Body>, http::Error> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+}
+
+#[tokio::test]
+async fn test_endpoint_specific_budgets_are_enforced() -> TestResult {
+    let spy = Arc::new(EndpointSpyLimiter::default());
+    let app = setup_test_app_with_rate_limiter(spy.clone(), false)?;
+
+    for uri in [
+        "/api/v1/auth/register",
+        "/api/v1/password/forgot",
+        "/api/v1/auth/mfa/verify",
+    ] {
+        let _ = send_request(&app, post_json(uri)?).await?;
+    }
+
+    let calls = spy.calls.lock().map_err(|e| e.to_string())?.clone();
+    let budget = |prefix: &str| {
+        calls
+            .iter()
+            .find(|(key, _)| key.starts_with(prefix))
+            .map(|(_, limit)| *limit)
+    };
+    assert_eq!(budget("ep_rl:register:"), Some(5), "{calls:?}");
+    assert_eq!(budget("ep_rl:forgot_password:"), Some(5), "{calls:?}");
+    assert_eq!(budget("ep_rl:mfa_verify:"), Some(10), "{calls:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_endpoint_budget_exhaustion_returns_429_with_retry_after() -> TestResult {
+    let spy = Arc::new(EndpointSpyLimiter {
+        deny: Some("ep_rl:forgot_password:"),
+        ..Default::default()
+    });
+    let app = setup_test_app_with_rate_limiter(spy, false)?;
+
+    let res = send_request(&app, post_json("/api/v1/password/forgot")?).await?;
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        res.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("30")
+    );
+
+    // Other endpoints are unaffected by that bucket.
+    let res = send_request(&app, post_json("/api/v1/auth/register")?).await?;
+    assert_ne!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_endpoint_budgets_fail_closed_when_the_limiter_errors() -> TestResult {
+    struct Broken;
+    #[async_trait]
+    impl RateLimiterPort for Broken {
+        async fn check_and_increment(
+            &self,
+            _key: &str,
+            _limit: u32,
+            _window: Duration,
+        ) -> Result<RateLimitStatus, PortError> {
+            Err(PortError::cache("redis down"))
+        }
+        async fn reset(&self, _key: &str) -> Result<(), PortError> {
+            Ok(())
+        }
+    }
+    let app = setup_test_app_with_rate_limiter(Arc::new(Broken), false)?;
+    let res = send_request(&app, post_json("/api/v1/password/forgot")?).await?;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_auth_extractor_rejects_mismatched_issuer_claim()
 -> Result<(), Box<dyn std::error::Error>> {
