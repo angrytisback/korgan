@@ -2,7 +2,7 @@
 name = "korgan"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94"
 description = "Enterprise-grade, self-hosted Identity and Access Management (IAM) & User Management API"
 license = "AGPL-3.0-only"
 authors = ["Eigen <eigen@teapot-dev.com>"]
