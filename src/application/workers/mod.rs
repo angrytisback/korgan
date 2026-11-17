@@ -5,4 +5,4 @@ pub mod events;
 pub mod worker;
 
 pub use events::{AppEvent, EventBus};
-pub use worker::{EventWorker, RetentionGcWorker};
+pub use worker::{EventWorker, RetentionGcWorker, join_worker};

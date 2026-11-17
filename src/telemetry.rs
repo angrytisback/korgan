@@ -80,6 +80,8 @@ pub fn init_prometheus() -> Result<PrometheusHandle, TelemetryError> {
     metrics::gauge!("korgan_audit_chain_length").set(0.0);
     metrics::gauge!("korgan_active_sessions_gauge").set(0.0);
     metrics::counter!("korgan_token_reuse_events_total").increment(0);
+    metrics::counter!("korgan_events_dropped_total", "kind" => "audit", "reason" => "queue_full")
+        .increment(0);
     for method in ["pwd", "mfa", "passkey", "oauth"] {
         for status in ["success", "failure"] {
             metrics::counter!("korgan_auth_attempts_total", "method" => method, "status" => status)

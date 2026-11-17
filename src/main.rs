@@ -16,7 +16,7 @@ use korgan::adapters::inbound::cli::{
 };
 use korgan::adapters::inbound::http::{AppState, build_router};
 use korgan::application::use_cases::cancellation::wait_for_shielded_tasks;
-use korgan::application::workers::RetentionGcWorker;
+use korgan::application::workers::{RetentionGcWorker, join_worker};
 use korgan::config::Settings;
 use korgan::{security, serve, shutdown_signal, telemetry};
 use tokio::net::TcpListener;
@@ -76,8 +76,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some(Commands::Serve) | None => {}
     }
 
-    state.sync_telemetry_gauges().await;
-
     let address = settings.socket_addr()?;
     let grace = settings.server.shutdown_grace();
     let environment = settings.server.environment;
@@ -95,8 +93,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
     );
     let gc_handle = tokio::spawn(gc_worker.run(gc_stop_rx));
 
+    let gauge_state = state.clone();
     let app = build_router(state)?;
     let listener = TcpListener::bind(address).await?;
+
+    // Seed the DB-backed gauges only after the socket is bound: with an
+    // unreachable database this call waits for the pool acquire timeout and
+    // must not delay readiness/liveness endpoints.
+    tokio::spawn(async move { gauge_state.sync_telemetry_gauges().await });
 
     tracing::info!(
         %address,
@@ -105,7 +109,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
         "korgan listening"
     );
 
-    serve(listener, app, shutdown_signal(), grace).await?;
+    // Keep the result: workers must be drained even when the server failed,
+    // otherwise buffered audit events would be lost on an unclean exit.
+    let served = serve(listener, app, shutdown_signal(), grace).await;
+    if let Err(error) = &served {
+        tracing::error!(%error, "http server terminated with an error; draining workers");
+    }
 
     // 2. Drain active shielded background tasks before terminating
     let drain_timeout = settings.workers.shutdown_drain();
@@ -123,10 +132,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
     }
 
     // 3. Signal workers to drain remaining jobs and shut down
+    // INVARIANT: a send error only means the worker already exited; its exit
+    // status is reported by `join_worker` below.
     let _ = worker_stop_tx.send(true);
     let _ = gc_stop_tx.send(true);
-    let _ = worker_handle.await;
-    let _ = gc_handle.await;
+    let events_clean = join_worker("event-worker", worker_handle).await;
+    let gc_clean = join_worker("retention-gc", gc_handle).await;
+
+    served?;
+    if !(events_clean && gc_clean) {
+        return Err("a background worker terminated abnormally".into());
+    }
 
     tracing::info!("korgan stopped");
     Ok(())
