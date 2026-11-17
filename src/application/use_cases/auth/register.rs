@@ -103,7 +103,26 @@ impl RegisterUserUseCase {
         let password_hash = self.password_hasher.hash_password(&raw_password).await?;
         let user = User::with_password(email, username, password_hash);
 
-        self.user_repo.create(&user).await?;
+        let audit = AuditLog::new(
+            Some(user.id),
+            cmd.ip_address,
+            cmd.user_agent,
+            cmd.request_id,
+            audit_events::REGISTER,
+            AuditEventStatus::Success,
+            serde_json::json!({ "email": user.email.as_str() }),
+        );
+
+        // The new account and its audit entry commit in ONE transaction.
+        self.event_bus
+            .audited(
+                async {
+                    self.user_repo.create(&user).await?;
+                    Ok::<(), AppError>(())
+                },
+                audit,
+            )
+            .await?;
 
         let (raw_token, token_hash) = generate_opaque_token();
         let token_key = format!("verify_email:{token_hash}");
@@ -115,18 +134,6 @@ impl RegisterUserUseCase {
             to: user.email.clone(),
             token: raw_token,
         });
-
-        self.event_bus
-            .record_audit(AuditLog::new(
-                Some(user.id),
-                cmd.ip_address,
-                cmd.user_agent,
-                cmd.request_id,
-                audit_events::REGISTER,
-                AuditEventStatus::Success,
-                serde_json::json!({ "email": user.email.as_str() }),
-            ))
-            .await;
 
         Ok(RegisterResult {
             user_id: user.id,

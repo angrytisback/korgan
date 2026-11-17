@@ -62,14 +62,45 @@ impl BanUserUseCase {
 
         let now = Utc::now();
         user.ban(now);
-        self.user_repo.update(&user).await?;
 
-        // Forcefully revoke all active sessions across all devices and sync to Redis blacklist
+        // Security audit event, committed atomically with the ban itself.
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "banned_by".to_string(),
+            serde_json::Value::String(cmd.actor_id.to_string()),
+        );
+        if let Some(ref r) = cmd.reason {
+            metadata.insert("reason".to_string(), serde_json::Value::String(r.clone()));
+        }
+
+        let audit = AuditLog::new(
+            Some(cmd.user_id),
+            None,
+            None,
+            RequestId::new(),
+            "USER_BANNED",
+            AuditEventStatus::Success,
+            serde_json::Value::Object(metadata),
+        );
+
+        // Ban the account and forcefully revoke all active sessions across all
+        // devices in ONE transaction together with the audit entry.
         let revoked_ids = self
-            .session_repo
-            .revoke_all_user_sessions(&cmd.user_id, None, "user_banned_by_admin")
+            .event_bus
+            .audited(
+                async {
+                    self.user_repo.update(&user).await?;
+                    let ids = self
+                        .session_repo
+                        .revoke_all_user_sessions(&cmd.user_id, None, "user_banned_by_admin")
+                        .await?;
+                    Ok::<_, AppError>(ids)
+                },
+                audit,
+            )
             .await?;
 
+        // Sync the revoked sessions to the Redis blacklist.
         let token_store = self.token_store.clone();
         let entries: Vec<(String, &'static str, std::time::Duration)> = revoked_ids
             .into_iter()
@@ -95,27 +126,6 @@ impl BanUserUseCase {
             }
         })
         .await?;
-
-        // Dispatch security audit event
-        let mut metadata = serde_json::Map::new();
-        metadata.insert(
-            "banned_by".to_string(),
-            serde_json::Value::String(cmd.actor_id.to_string()),
-        );
-        if let Some(ref r) = cmd.reason {
-            metadata.insert("reason".to_string(), serde_json::Value::String(r.clone()));
-        }
-
-        let audit = AuditLog::new(
-            Some(cmd.user_id),
-            None,
-            None,
-            RequestId::new(),
-            "USER_BANNED",
-            AuditEventStatus::Success,
-            serde_json::Value::Object(metadata),
-        );
-        self.event_bus.record_audit(audit).await;
 
         Ok(BanUserResult {
             id: user.id,

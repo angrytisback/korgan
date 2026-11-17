@@ -142,14 +142,34 @@ impl ResetPasswordUseCase {
 
         // Hash and atomically update password + history
         let new_hash = self.password_hasher.hash_password(&raw_password).await?;
-        self.user_repo
-            .update_password(&user.id, &new_hash, self.history_depth)
-            .await?;
+        let audit = AuditLog::new(
+            Some(user.id),
+            cmd.ip_address,
+            cmd.user_agent,
+            cmd.request_id,
+            audit_events::PASSWORD_RESET,
+            AuditEventStatus::Success,
+            serde_json::json!({}),
+        );
 
-        // Invalidate all active sessions across all devices and sync to Redis blacklist
+        // The password change, session revocation and audit entry commit in ONE
+        // transaction; the Redis blacklist sync follows.
         let revoked_ids = self
-            .session_repo
-            .revoke_all_user_sessions(&user.id, None, "password_reset")
+            .event_bus
+            .audited(
+                async {
+                    self.user_repo
+                        .update_password(&user.id, &new_hash, self.history_depth)
+                        .await?;
+
+                    let ids = self
+                        .session_repo
+                        .revoke_all_user_sessions(&user.id, None, "password_reset")
+                        .await?;
+                    Ok::<_, AppError>(ids)
+                },
+                audit,
+            )
             .await?;
 
         let token_store = self.token_store.clone();
@@ -177,18 +197,6 @@ impl ResetPasswordUseCase {
             }
         })
         .await?;
-
-        self.event_bus
-            .record_audit(AuditLog::new(
-                Some(user.id),
-                cmd.ip_address,
-                cmd.user_agent,
-                cmd.request_id,
-                audit_events::PASSWORD_RESET,
-                AuditEventStatus::Success,
-                serde_json::json!({}),
-            ))
-            .await;
 
         Ok(())
     }

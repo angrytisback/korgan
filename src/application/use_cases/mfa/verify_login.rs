@@ -181,28 +181,41 @@ impl VerifyMfaLoginUseCase {
             let lockout_chrono = chrono::Duration::from_std(self.lockout_duration)
                 .map_err(|e| AppError::internal("invalid lockout duration configuration", e))?;
             let lockout_until = now + lockout_chrono;
-            let (failed_attempts, locked_until) = self
-                .user_repo
-                .record_failed_login_atomic(&user.id, self.max_failed_attempts, lockout_until, now)
+            // The failed-attempt counter (and lockout) and its audit entry commit
+            // in ONE transaction.
+            let _ = self
+                .event_bus
+                .audited_with(
+                    async {
+                        let outcome = self
+                            .user_repo
+                            .record_failed_login_atomic(
+                                &user.id,
+                                self.max_failed_attempts,
+                                lockout_until,
+                                now,
+                            )
+                            .await?;
+                        Ok::<_, AppError>(outcome)
+                    },
+                    |(failed_attempts, locked_until)| {
+                        let is_locked = locked_until.is_some_and(|until| until > now);
+                        AuditLog::new(
+                            Some(user.id),
+                            Some(cmd.ip_address),
+                            cmd.user_agent.clone(),
+                            cmd.request_id,
+                            audit_events::LOGIN_FAILED,
+                            AuditEventStatus::Failure,
+                            serde_json::json!({
+                                "reason": "invalid_mfa_code",
+                                "failed_attempts": failed_attempts,
+                                "locked": is_locked
+                            }),
+                        )
+                    },
+                )
                 .await?;
-
-            let is_locked = locked_until.is_some_and(|until| until > now);
-
-            self.event_bus
-                .record_audit(AuditLog::new(
-                    Some(user.id),
-                    Some(cmd.ip_address),
-                    cmd.user_agent,
-                    cmd.request_id,
-                    audit_events::LOGIN_FAILED,
-                    AuditEventStatus::Failure,
-                    serde_json::json!({
-                        "reason": "invalid_mfa_code",
-                        "failed_attempts": failed_attempts,
-                        "locked": is_locked
-                    }),
-                ))
-                .await;
 
             return Err(AppError::InvalidCredentials);
         }
@@ -221,17 +234,34 @@ impl VerifyMfaLoginUseCase {
             refresh_chrono,
         )
         .with_amr(vec!["pwd".to_string(), "mfa".to_string()]);
-        self.session_repo
-            .create(&session)
-            .await
-            .map_err(|e| match e {
-                crate::ports::PortError::Conflict { .. } => AppError::Forbidden,
-                other => AppError::from(other),
-            })?;
+        let audit = AuditLog::new(
+            Some(user.id),
+            Some(cmd.ip_address),
+            cmd.user_agent,
+            cmd.request_id,
+            audit_events::LOGIN_SUCCESS,
+            AuditEventStatus::Success,
+            serde_json::json!({ "session_id": session.id.to_string(), "mfa_verified": true }),
+        );
 
-        // Session created successfully: atomically reset failed login attempts without
-        // overwriting any other fields (such as account status).
-        self.user_repo.reset_failed_logins(&user.id, now).await?;
+        // Session creation (guarding against concurrent bans), the failed-attempt
+        // reset and the login audit entry commit in ONE transaction.
+        self.event_bus
+            .audited(
+                async {
+                    self.session_repo
+                        .create(&session)
+                        .await
+                        .map_err(|e| match e {
+                            crate::ports::PortError::Conflict { .. } => AppError::Forbidden,
+                            other => AppError::from(other),
+                        })?;
+                    self.user_repo.reset_failed_logins(&user.id, now).await?;
+                    Ok::<(), AppError>(())
+                },
+                audit,
+            )
+            .await?;
 
         let exp = now.timestamp() + self.access_token_ttl.as_secs() as i64;
         let iat = now.timestamp();
@@ -250,18 +280,6 @@ impl VerifyMfaLoginUseCase {
         };
 
         let access_token = self.token_signer.sign_access_token(&claims)?;
-
-        self.event_bus
-            .record_audit(AuditLog::new(
-                Some(user.id),
-                Some(cmd.ip_address),
-                cmd.user_agent,
-                cmd.request_id,
-                audit_events::LOGIN_SUCCESS,
-                AuditEventStatus::Success,
-                serde_json::json!({ "session_id": session.id.to_string(), "mfa_verified": true }),
-            ))
-            .await;
 
         Ok(AuthTokensResult {
             access_token,

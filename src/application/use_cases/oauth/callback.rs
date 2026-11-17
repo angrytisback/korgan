@@ -253,13 +253,35 @@ impl OAuthCallbackUseCase {
             chrono_refresh_ttl,
         )
         .with_amr(vec!["oauth".to_string()]);
-        self.session_repo
-            .create(&session)
-            .await
-            .map_err(|e| match e {
-                crate::ports::PortError::Conflict { .. } => AppError::Forbidden,
-                other => AppError::from(other),
-            })?;
+        let audit = AuditLog::new(
+            Some(user.id),
+            Some(cmd.ip_address),
+            cmd.user_agent,
+            cmd.request_id,
+            audit_events::LOGIN_SUCCESS,
+            AuditEventStatus::Success,
+            serde_json::json!({
+                "provider": cmd.provider.as_str(),
+                "oauth_login": true
+            }),
+        );
+
+        // The session and its login audit entry commit in ONE transaction.
+        self.event_bus
+            .audited(
+                async {
+                    self.session_repo
+                        .create(&session)
+                        .await
+                        .map_err(|e| match e {
+                            crate::ports::PortError::Conflict { .. } => AppError::Forbidden,
+                            other => AppError::from(other),
+                        })?;
+                    Ok::<(), AppError>(())
+                },
+                audit,
+            )
+            .await?;
 
         let expires_in = self.access_token_ttl.as_secs() as i64;
         let claims = AccessTokenClaims {
@@ -275,22 +297,6 @@ impl OAuthCallbackUseCase {
         };
 
         let access_token = self.token_signer.sign_access_token(&claims)?;
-
-        // 5. Emit Audit Log
-        self.event_bus
-            .record_audit(AuditLog::new(
-                Some(user.id),
-                Some(cmd.ip_address),
-                cmd.user_agent,
-                cmd.request_id,
-                audit_events::LOGIN_SUCCESS,
-                AuditEventStatus::Success,
-                serde_json::json!({
-                    "provider": cmd.provider.as_str(),
-                    "oauth_login": true
-                }),
-            ))
-            .await;
 
         Ok(AuthTokensResult {
             access_token,

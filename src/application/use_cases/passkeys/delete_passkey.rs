@@ -57,15 +57,6 @@ impl DeletePasskeyUseCase {
             return Err(AppError::Forbidden);
         }
 
-        let deleted = self
-            .passkey_repo
-            .delete_by_id_and_user_id(&passkey_id, &user_id)
-            .await?;
-
-        if !deleted {
-            return Err(AppError::from(DomainError::PasskeyNotFound));
-        }
-
         let audit = AuditLog::new(
             Some(user_id),
             actor_ip,
@@ -78,7 +69,23 @@ impl DeletePasskeyUseCase {
                 "passkey_name": passkey.name,
             }),
         );
-        self.event_bus.record_audit(audit).await;
+
+        // Deletion and its audit entry commit together.
+        self.event_bus
+            .audited(
+                async {
+                    let deleted = self
+                        .passkey_repo
+                        .delete_by_id_and_user_id(&passkey_id, &user_id)
+                        .await?;
+                    if !deleted {
+                        return Err(AppError::from(DomainError::PasskeyNotFound));
+                    }
+                    Ok::<(), AppError>(())
+                },
+                audit,
+            )
+            .await?;
 
         Ok(())
     }

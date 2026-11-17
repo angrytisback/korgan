@@ -52,8 +52,6 @@ impl UnbanUserUseCase {
 
         let now = Utc::now();
         user.unban(now);
-        self.user_repo.update(&user).await?;
-
         // Dispatch security audit event
         let mut metadata = serde_json::Map::new();
         metadata.insert(
@@ -70,7 +68,15 @@ impl UnbanUserUseCase {
             AuditEventStatus::Success,
             serde_json::Value::Object(metadata),
         );
-        self.event_bus.record_audit(audit).await;
+        self.event_bus
+            .audited(
+                async {
+                    self.user_repo.update(&user).await?;
+                    Ok::<(), AppError>(())
+                },
+                audit,
+            )
+            .await?;
 
         Ok(UnbanUserResult {
             id: user.id,

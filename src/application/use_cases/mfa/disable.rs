@@ -76,20 +76,23 @@ impl DisableTotpUseCase {
         if !is_valid {
             return Err(AppError::InvalidCredentials);
         }
-
-        self.user_repo.delete_mfa(&user.id).await?;
-
         self.event_bus
-            .record_audit(AuditLog::new(
-                Some(user.id),
-                cmd.ip_address,
-                cmd.user_agent,
-                cmd.request_id,
-                audit_events::MFA_DISABLED,
-                AuditEventStatus::Success,
-                serde_json::json!({}),
-            ))
-            .await;
+            .audited(
+                async {
+                    self.user_repo.delete_mfa(&user.id).await?;
+                    Ok::<(), AppError>(())
+                },
+                AuditLog::new(
+                    Some(user.id),
+                    cmd.ip_address,
+                    cmd.user_agent,
+                    cmd.request_id,
+                    audit_events::MFA_DISABLED,
+                    AuditEventStatus::Success,
+                    serde_json::json!({}),
+                ),
+            )
+            .await?;
 
         Ok(())
     }

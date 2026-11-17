@@ -50,19 +50,39 @@ impl RevokeSessionUseCase {
     pub async fn execute(&self, cmd: RevokeSessionCommand) -> Result<(), AppError> {
         cmd.validate()?;
 
-        let revoked = self
-            .session_repo
-            .revoke_by_id_and_user_id(&cmd.session_id, &cmd.user_id, "user_logout")
-            .await?;
+        let audit = AuditLog::new(
+            Some(cmd.user_id),
+            cmd.ip_address,
+            cmd.user_agent,
+            cmd.request_id,
+            audit_events::SESSION_REVOKED,
+            AuditEventStatus::Success,
+            serde_json::json!({ "session_id": cmd.session_id.to_string() }),
+        );
 
-        if revoked.is_none() {
-            if let Some(session) = self.session_repo.find_by_id(&cmd.session_id).await?
-                && session.user_id != cmd.user_id
-            {
-                return Err(AppError::Forbidden);
-            }
-            return Err(AppError::NotFound);
-        }
+        // Revocation and its audit entry commit in ONE transaction. When
+        // nothing was revoked the work fails and the transaction is rolled back.
+        self.event_bus
+            .audited(
+                async {
+                    let revoked = self
+                        .session_repo
+                        .revoke_by_id_and_user_id(&cmd.session_id, &cmd.user_id, "user_logout")
+                        .await?;
+
+                    if revoked.is_none() {
+                        if let Some(session) = self.session_repo.find_by_id(&cmd.session_id).await?
+                            && session.user_id != cmd.user_id
+                        {
+                            return Err(AppError::Forbidden);
+                        }
+                        return Err(AppError::NotFound);
+                    }
+                    Ok::<(), AppError>(())
+                },
+                audit,
+            )
+            .await?;
 
         let token_store = self.token_store.clone();
         let session_id = cmd.session_id;
@@ -80,18 +100,6 @@ impl RevokeSessionUseCase {
             }
         })
         .await?;
-
-        self.event_bus
-            .record_audit(AuditLog::new(
-                Some(cmd.user_id),
-                cmd.ip_address,
-                cmd.user_agent,
-                cmd.request_id,
-                audit_events::SESSION_REVOKED,
-                AuditEventStatus::Success,
-                serde_json::json!({ "session_id": cmd.session_id.to_string() }),
-            ))
-            .await;
 
         Ok(())
     }

@@ -87,8 +87,6 @@ impl FinishPasskeyRegistrationUseCase {
         let passkey_name = cmd.name.unwrap_or_else(|| "Passkey".to_owned());
         let passkey = Passkey::new(user_id, credential_id, passkey_json, passkey_name);
 
-        self.passkey_repo.save(&passkey).await?;
-
         let audit = AuditLog::new(
             Some(user_id),
             actor_ip,
@@ -101,7 +99,16 @@ impl FinishPasskeyRegistrationUseCase {
                 "passkey_name": passkey.name,
             }),
         );
-        self.event_bus.record_audit(audit).await;
+        // The passkey and its audit entry commit together.
+        self.event_bus
+            .audited(
+                async {
+                    self.passkey_repo.save(&passkey).await?;
+                    Ok::<(), AppError>(())
+                },
+                audit,
+            )
+            .await?;
 
         Ok(PasskeyRegistrationFinishResult {
             id: passkey.id,

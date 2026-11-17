@@ -49,21 +49,25 @@ impl UnlockUserUseCase {
             .ok_or(AppError::NotFound)?;
 
         let now = Utc::now();
-        self.user_repo.reset_failed_logins(&user.id, now).await?;
-
         self.event_bus
-            .record_audit(AuditLog::new(
-                Some(user.id),
-                None,
-                Some("korgan-cli-unlock".to_string()),
-                RequestId::new(),
-                "user_unlocked",
-                AuditEventStatus::Success,
-                serde_json::json!({
-                    "email": user.email.as_str(),
-                }),
-            ))
-            .await;
+            .audited(
+                async {
+                    self.user_repo.reset_failed_logins(&user.id, now).await?;
+                    Ok::<(), AppError>(())
+                },
+                AuditLog::new(
+                    Some(user.id),
+                    None,
+                    Some("korgan-cli-unlock".to_string()),
+                    RequestId::new(),
+                    "user_unlocked",
+                    AuditEventStatus::Success,
+                    serde_json::json!({
+                        "email": user.email.as_str(),
+                    }),
+                ),
+            )
+            .await?;
 
         Ok(())
     }
