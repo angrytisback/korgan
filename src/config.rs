@@ -169,6 +169,57 @@ pub struct Settings {
     pub oauth: OAuthSettings,
     /// WebAuthn / Passkeys settings.
     pub webauthn: WebauthnSettings,
+    /// Background workers and event queue tuning.
+    #[serde(default)]
+    pub workers: WorkerSettings,
+}
+
+/// Background workers and event queue tuning.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct WorkerSettings {
+    /// Capacity of the bounded in-memory event queue (audit and e-mail events).
+    pub event_queue_capacity: usize,
+    /// Interval between retention GC runs.
+    pub gc_interval_secs: u64,
+    /// Maximum rows purged per GC step.
+    pub gc_batch_size: u32,
+    /// Age after which never-verified accounts are purged.
+    pub unverified_retention_secs: u64,
+    /// Time allowed for in-flight shielded tasks to finish during shutdown.
+    pub shutdown_drain_secs: u64,
+}
+
+impl Default for WorkerSettings {
+    fn default() -> Self {
+        Self {
+            event_queue_capacity: 1024,
+            gc_interval_secs: 3_600,
+            gc_batch_size: 500,
+            unverified_retention_secs: 7 * 24 * 3_600,
+            shutdown_drain_secs: 10,
+        }
+    }
+}
+
+impl WorkerSettings {
+    /// Interval between retention GC runs.
+    #[must_use]
+    pub const fn gc_interval(&self) -> Duration {
+        Duration::from_secs(self.gc_interval_secs)
+    }
+
+    /// Age after which never-verified accounts are purged.
+    #[must_use]
+    pub const fn unverified_retention(&self) -> Duration {
+        Duration::from_secs(self.unverified_retention_secs)
+    }
+
+    /// Time allowed for in-flight shielded tasks to finish during shutdown.
+    #[must_use]
+    pub const fn shutdown_drain(&self) -> Duration {
+        Duration::from_secs(self.shutdown_drain_secs)
+    }
 }
 
 /// HTTP server settings.
@@ -221,6 +272,14 @@ pub struct DatabaseSettings {
     pub idle_timeout_secs: u64,
     /// Whether embedded migrations run at startup.
     pub run_migrations: bool,
+    /// Server-side `statement_timeout` applied to every pooled connection
+    /// (`0` disables it).
+    #[serde(default = "default_statement_timeout_secs")]
+    pub statement_timeout_secs: u64,
+}
+
+const fn default_statement_timeout_secs() -> u64 {
+    15
 }
 
 /// Redis / Valkey settings.
@@ -594,6 +653,18 @@ impl Settings {
         let redis_url = self.redis.url.expose_secret();
         if !(redis_url.starts_with("redis://") || redis_url.starts_with("rediss://")) {
             problems.push("redis.url must start with redis:// or rediss://".to_owned());
+        }
+        if self.redis.connect_timeout_secs == 0 {
+            problems.push("redis.connect_timeout_secs must be greater than zero".to_owned());
+        }
+        if self.workers.event_queue_capacity == 0 {
+            problems.push("workers.event_queue_capacity must be at least 1".to_owned());
+        }
+        if self.workers.gc_interval_secs == 0 {
+            problems.push("workers.gc_interval_secs must be greater than zero".to_owned());
+        }
+        if self.workers.gc_batch_size == 0 {
+            problems.push("workers.gc_batch_size must be at least 1".to_owned());
         }
         if self.redis.pool_size == 0 {
             problems.push("redis.pool_size must be at least 1".to_owned());
@@ -1211,6 +1282,58 @@ mod tests {
     fn socket_addr_is_derived_from_host_and_port() -> TestResult {
         let settings = Settings::load_from_env(base_env())?;
         assert_eq!(settings.socket_addr()?, "0.0.0.0:8080".parse()?);
+        Ok(())
+    }
+
+    #[test]
+    fn worker_defaults_match_previous_hardcoded_values() -> Result<(), ConfigError> {
+        let settings = Settings::load_from_env(base_env())?;
+        assert_eq!(settings.workers.event_queue_capacity, 1024);
+        assert_eq!(settings.workers.gc_interval(), Duration::from_secs(3_600));
+        assert_eq!(settings.workers.gc_batch_size, 500);
+        assert_eq!(
+            settings.workers.unverified_retention(),
+            Duration::from_secs(7 * 24 * 3_600)
+        );
+        assert_eq!(settings.workers.shutdown_drain(), Duration::from_secs(10));
+        assert_eq!(settings.database.statement_timeout_secs, 15);
+        Ok(())
+    }
+
+    #[test]
+    fn worker_settings_are_overridable_and_validated() -> Result<(), ConfigError> {
+        let mut env = base_env();
+        env.insert(
+            "KORGAN__WORKERS__EVENT_QUEUE_CAPACITY".to_owned(),
+            "4096".to_owned(),
+        );
+        let settings = Settings::load_from_env(env)?;
+        assert_eq!(settings.workers.event_queue_capacity, 4096);
+
+        let mut env = base_env();
+        env.insert(
+            "KORGAN__WORKERS__EVENT_QUEUE_CAPACITY".to_owned(),
+            "0".to_owned(),
+        );
+        env.insert(
+            "KORGAN__WORKERS__GC_INTERVAL_SECS".to_owned(),
+            "0".to_owned(),
+        );
+        let Err(ConfigError::Invalid(problems)) = Settings::load_from_env(env) else {
+            return Err(ConfigError::Invalid(vec![
+                "expected validation failure".to_owned(),
+            ]));
+        };
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("workers.event_queue_capacity"))
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("workers.gc_interval_secs"))
+        );
         Ok(())
     }
 }

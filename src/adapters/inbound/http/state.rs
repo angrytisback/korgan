@@ -163,8 +163,8 @@ impl AppState {
         let login_config = LoginConfig {
             max_failed_attempts: settings.auth.max_failed_login_attempts,
             lockout_duration: Duration::from_secs(settings.auth.lockout_duration_secs),
-            rate_limit_window: Duration::from_secs(60),
-            max_attempts_per_ip: 10,
+            rate_limit_window: Duration::from_secs(settings.rate_limit.window_secs),
+            max_attempts_per_ip: settings.rate_limit.login_max_requests,
             access_token_ttl: Duration::from_secs(settings.auth.access_token_ttl_secs),
             refresh_token_ttl: Duration::from_secs(settings.auth.refresh_token_ttl_secs),
             mfa_ticket_ttl: Duration::from_secs(settings.auth.mfa_challenge_ttl_secs),
@@ -431,12 +431,8 @@ impl AppState {
         settings: Arc<Settings>,
     ) -> Result<(Self, EventWorker), Box<dyn std::error::Error + Send + Sync>> {
         // 1. Database & Cache Pools
-        let pg_pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(settings.database.max_connections)
-            .connect_lazy(settings.database.url.expose_secret())?;
-
-        let redis_cfg = deadpool_redis::Config::from_url(settings.redis.url.expose_secret());
-        let redis_pool = redis_cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
+        let pg_pool = build_pg_pool(&settings)?;
+        let redis_pool = build_redis_pool(&settings)?;
 
         // 2. Repositories
         let user_repo: Arc<dyn UserRepository> =
@@ -552,7 +548,7 @@ impl AppState {
         )?);
 
         // 6. Asynchronous Event Bus & Background Worker
-        let (event_bus, event_rx) = EventBus::new(1024);
+        let (event_bus, event_rx) = EventBus::new(settings.workers.event_queue_capacity);
         let event_worker = EventWorker::new(
             event_rx,
             mail_provider.clone(),
@@ -610,6 +606,112 @@ impl AppState {
             .await
             .map_err(|e| format!("redis ping failed: {e}"))?;
 
+        Ok(())
+    }
+}
+
+/// Builds the lazy PostgreSQL pool from validated settings.
+///
+/// Honors every pool-related key: size bounds, acquire/idle timeouts and the
+/// server-side `statement_timeout`.
+fn build_pg_pool(
+    settings: &Settings,
+) -> Result<sqlx::PgPool, Box<dyn std::error::Error + Send + Sync>> {
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+    let db = &settings.database;
+    let mut options: PgConnectOptions = db.url.expose_secret().parse()?;
+    if db.statement_timeout_secs > 0 {
+        let millis = db.statement_timeout_secs.saturating_mul(1_000);
+        options = options.options([("statement_timeout", millis.to_string())]);
+    }
+
+    Ok(PgPoolOptions::new()
+        .max_connections(db.max_connections)
+        .min_connections(db.min_connections)
+        .acquire_timeout(Duration::from_secs(db.acquire_timeout_secs))
+        .idle_timeout(Duration::from_secs(db.idle_timeout_secs))
+        .connect_lazy_with(options))
+}
+
+/// Builds the Redis pool with a bounded size and bounded waits, so a Redis
+/// stall fails fast (fail-closed) instead of queueing requests indefinitely.
+fn build_redis_pool(
+    settings: &Settings,
+) -> Result<deadpool_redis::Pool, Box<dyn std::error::Error + Send + Sync>> {
+    let redis = &settings.redis;
+    let wait = Some(Duration::from_secs(redis.connect_timeout_secs));
+
+    let mut config = deadpool_redis::Config::from_url(redis.url.expose_secret());
+    let mut pool_config = deadpool_redis::PoolConfig::new(redis.pool_size);
+    pool_config.timeouts = deadpool_redis::Timeouts {
+        wait,
+        create: wait,
+        recycle: wait,
+    };
+    config.pool = Some(pool_config);
+
+    Ok(config.create_pool(Some(deadpool_redis::Runtime::Tokio1))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn settings(extra: &[(&str, &str)]) -> Result<Settings, Box<dyn std::error::Error>> {
+        let mut env = HashMap::from([
+            ("DATABASE_URL".to_owned(), "postgres://u:p@localhost:5432/db".to_owned()),
+            ("REDIS_URL".to_owned(), "redis://localhost:6379".to_owned()),
+            (
+                "KORGAN__CRYPTO__ED25519_PRIVATE_KEY_PEM".to_owned(),
+                "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIFSBy32VLsvjiPTGXm9ph2VZP5r6FjDhPLO303Qtn3P7\n-----END PRIVATE KEY-----".to_owned(),
+            ),
+            (
+                "KORGAN__CRYPTO__AES_MASTER_KEY".to_owned(),
+                "EoX9enVeNrsuJbH6JMOBqg7qEq9/41ceeI0Q6S4lyAA=".to_owned(),
+            ),
+        ]);
+        env.extend(
+            extra
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+        );
+        Ok(Settings::load_from_env(env)?)
+    }
+
+    #[tokio::test]
+    async fn pg_pool_honors_configured_bounds_and_timeouts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let settings = settings(&[
+            ("KORGAN__DATABASE__MAX_CONNECTIONS", "7"),
+            ("KORGAN__DATABASE__MIN_CONNECTIONS", "1"),
+            ("KORGAN__DATABASE__ACQUIRE_TIMEOUT_SECS", "3"),
+            ("KORGAN__DATABASE__IDLE_TIMEOUT_SECS", "42"),
+        ])?;
+        let pool = build_pg_pool(&settings).map_err(|e| e.to_string())?;
+        let options = pool.options();
+        assert_eq!(options.get_max_connections(), 7);
+        assert_eq!(options.get_min_connections(), 1);
+        assert_eq!(options.get_acquire_timeout(), Duration::from_secs(3));
+        assert_eq!(options.get_idle_timeout(), Some(Duration::from_secs(42)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn redis_pool_honors_configured_size_and_timeouts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let settings = settings(&[
+            ("KORGAN__REDIS__POOL_SIZE", "5"),
+            ("KORGAN__REDIS__CONNECT_TIMEOUT_SECS", "2"),
+        ])?;
+        let pool = build_redis_pool(&settings).map_err(|e| e.to_string())?;
+        assert_eq!(pool.status().max_size, 5);
+        let timeouts = pool.timeouts();
+        assert_eq!(timeouts.wait, Some(Duration::from_secs(2)));
+        assert_eq!(timeouts.create, Some(Duration::from_secs(2)));
+        assert_eq!(timeouts.recycle, Some(Duration::from_secs(2)));
         Ok(())
     }
 }

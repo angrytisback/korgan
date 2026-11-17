@@ -41,6 +41,8 @@ min_connections = 2
 acquire_timeout_secs = 5
 idle_timeout_secs = 600
 run_migrations = true
+# Server-side statement_timeout for every pooled connection (0 disables it).
+statement_timeout_secs = 15
 
 [redis]
 # url = <required, secret>
@@ -107,6 +109,15 @@ api_url = "https://api.pwnedpasswords.com"
 timeout_secs = 3
 # When the HIBP service is unreachable: true = allow, false = reject.
 fail_open = true
+
+[workers]
+# Bounded in-memory queue shared by audit and e-mail events. When it is full,
+# events are dropped and counted in korgan_events_dropped_total.
+event_queue_capacity = 1024
+gc_interval_secs = 3600
+gc_batch_size = 500
+unverified_retention_secs = 604800
+shutdown_drain_secs = 10
 
 [rate_limit]
 enabled = true
