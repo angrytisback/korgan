@@ -1,0 +1,6 @@
+# Tracks the stable channel; the minimum supported version is declared by
+# `rust-version` in Cargo.toml (checked in CI by the `msrv` job).
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
