@@ -135,5 +135,11 @@ jobs:
       - name: Run complete test suite
         run: cargo test --locked --all-targets -- --nocapture
 
+      - name: Run real-database tests (embedded migrations, audit outbox)
+        run: cargo test --locked --test real_db -- --ignored
+        env:
+          # Each test creates and drops its own database on this server.
+          KORGAN_TEST_DATABASE_URL: postgres://iam:iam_dev_password@localhost:5432/postgres
+
       - name: Run documentation tests
         run: cargo test --locked --doc
