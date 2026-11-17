@@ -327,3 +327,33 @@ impl RetentionGcWorker {
         }
     }
 }
+
+/// Awaits a background worker task and reports whether it ended cleanly.
+///
+/// A panicked or cancelled worker is logged instead of silently discarded.
+pub async fn join_worker(name: &'static str, handle: tokio::task::JoinHandle<()>) -> bool {
+    match handle.await {
+        Ok(()) => true,
+        Err(e) => {
+            error!(worker = name, error = %e, "background worker terminated abnormally");
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::join_worker;
+
+    #[tokio::test]
+    async fn join_worker_reports_clean_exit() {
+        assert!(join_worker("ok", tokio::spawn(async {})).await);
+    }
+
+    #[tokio::test]
+    async fn join_worker_reports_panicked_worker() {
+        #[allow(clippy::panic)]
+        let handle = tokio::spawn(async { panic!("worker crashed") });
+        assert!(!join_worker("panicky", handle).await);
+    }
+}
