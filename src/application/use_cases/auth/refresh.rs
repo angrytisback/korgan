@@ -9,7 +9,7 @@ use validator::Validate;
 use crate::application::dto::{AuthTokensResult, RefreshTokenCommand};
 use crate::application::error::AppError;
 use crate::application::use_cases::token_utils::{generate_opaque_token, hash_token};
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::entities::audit_events;
 use crate::domain::entities::{AuditEventStatus, AuditLog, Session};
 use crate::ports::cache::TokenStore;
@@ -115,7 +115,7 @@ impl RefreshSessionUseCase {
         .await?;
 
         self.event_bus
-            .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+            .record_audit(AuditLog::new(
                 Some(session.user_id),
                 Some(cmd.ip_address),
                 cmd.user_agent.clone(),
@@ -126,7 +126,8 @@ impl RefreshSessionUseCase {
                     "session_id": session.id.to_string(),
                     "token_family_id": session.token_family_id.to_string(),
                 }),
-            ))));
+            ))
+            .await;
 
         metrics::counter!("korgan_token_reuse_events_total").increment(1);
         Err(AppError::TokenReuseDetected)

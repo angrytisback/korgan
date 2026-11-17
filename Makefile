@@ -5,7 +5,7 @@ export SQLX_OFFLINE := true
 # Keep in sync with `rust-version` in Cargo.toml.
 MSRV := 1.94
 
-.PHONY: help build test lint fmt fmt-check doc boundaries audit msrv check run
+.PHONY: help build test test-db lint fmt fmt-check doc boundaries audit msrv check run
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST)
@@ -16,6 +16,10 @@ build: ## Build (debug)
 test: ## Run the full test suite (in-memory fakes, no Postgres/Redis needed)
 	cargo test --locked --all-targets
 	cargo test --locked --doc
+
+test-db: ## Tests against a real PostgreSQL (set KORGAN_TEST_DATABASE_URL, see tests/real_db.rs)
+	@test -n "$$KORGAN_TEST_DATABASE_URL" || { echo "set KORGAN_TEST_DATABASE_URL"; exit 1; }
+	cargo test --locked --test real_db -- --ignored
 
 lint: ## Clippy with warnings as errors
 	cargo clippy --locked --all-targets --all-features -- -D warnings

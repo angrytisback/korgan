@@ -9,7 +9,7 @@ use validator::Validate;
 use crate::application::dto::{AuthTokensResult, VerifyMfaLoginCommand};
 use crate::application::error::AppError;
 use crate::application::use_cases::token_utils::{generate_opaque_token, hash_token};
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::entities::audit_events;
 use crate::domain::entities::{AuditEventStatus, AuditLog, Session};
 use crate::domain::value_objects::UserId;
@@ -189,7 +189,7 @@ impl VerifyMfaLoginUseCase {
             let is_locked = locked_until.is_some_and(|until| until > now);
 
             self.event_bus
-                .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+                .record_audit(AuditLog::new(
                     Some(user.id),
                     Some(cmd.ip_address),
                     cmd.user_agent,
@@ -201,7 +201,8 @@ impl VerifyMfaLoginUseCase {
                         "failed_attempts": failed_attempts,
                         "locked": is_locked
                     }),
-                ))));
+                ))
+                .await;
 
             return Err(AppError::InvalidCredentials);
         }
@@ -251,7 +252,7 @@ impl VerifyMfaLoginUseCase {
         let access_token = self.token_signer.sign_access_token(&claims)?;
 
         self.event_bus
-            .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+            .record_audit(AuditLog::new(
                 Some(user.id),
                 Some(cmd.ip_address),
                 cmd.user_agent,
@@ -259,7 +260,8 @@ impl VerifyMfaLoginUseCase {
                 audit_events::LOGIN_SUCCESS,
                 AuditEventStatus::Success,
                 serde_json::json!({ "session_id": session.id.to_string(), "mfa_verified": true }),
-            ))));
+            ))
+            .await;
 
         Ok(AuthTokensResult {
             access_token,

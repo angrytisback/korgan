@@ -178,8 +178,14 @@ pub struct Settings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WorkerSettings {
-    /// Capacity of the bounded in-memory event queue (audit and e-mail events).
+    /// Capacity of the bounded in-memory event queue (e-mail events, and audit
+    /// events when the durable outbox is unavailable).
     pub event_queue_capacity: usize,
+    /// Audit entries moved into the hash chain per transaction.
+    pub audit_outbox_batch_size: u32,
+    /// Maximum delay before queued audit entries are picked up (also covers
+    /// entries enqueued by other replicas).
+    pub audit_outbox_poll_ms: u64,
     /// Interval between retention GC runs.
     pub gc_interval_secs: u64,
     /// Maximum rows purged per GC step.
@@ -194,6 +200,8 @@ impl Default for WorkerSettings {
     fn default() -> Self {
         Self {
             event_queue_capacity: 1024,
+            audit_outbox_batch_size: 200,
+            audit_outbox_poll_ms: 1_000,
             gc_interval_secs: 3_600,
             gc_batch_size: 500,
             unverified_retention_secs: 7 * 24 * 3_600,
@@ -668,6 +676,12 @@ impl Settings {
         }
         if self.workers.event_queue_capacity == 0 {
             problems.push("workers.event_queue_capacity must be at least 1".to_owned());
+        }
+        if self.workers.audit_outbox_batch_size == 0 {
+            problems.push("workers.audit_outbox_batch_size must be at least 1".to_owned());
+        }
+        if self.workers.audit_outbox_poll_ms == 0 {
+            problems.push("workers.audit_outbox_poll_ms must be greater than zero".to_owned());
         }
         if self.workers.gc_interval_secs == 0 {
             problems.push("workers.gc_interval_secs must be greater than zero".to_owned());

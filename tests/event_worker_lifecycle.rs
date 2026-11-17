@@ -197,3 +197,145 @@ async fn dispatch_on_full_queue_drops_without_blocking() {
         "second event must have been dropped"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Durable audit outbox
+// ---------------------------------------------------------------------------
+
+use korgan::ports::repositories::AuditOutbox;
+
+#[derive(Default)]
+struct FakeOutbox {
+    queued: Mutex<Vec<AuditLog>>,
+    chained: Mutex<Vec<AuditLog>>,
+    fail_enqueue: bool,
+}
+
+#[async_trait]
+impl AuditOutbox for FakeOutbox {
+    async fn enqueue(&self, entry: &AuditLog) -> Result<(), PortError> {
+        if self.fail_enqueue {
+            return Err(PortError::database("outbox unavailable"));
+        }
+        self.queued
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?
+            .push(entry.clone());
+        Ok(())
+    }
+
+    async fn drain(&self, limit: u32) -> Result<u32, PortError> {
+        let mut queued = self
+            .queued
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?;
+        let take = queued.len().min(limit as usize);
+        let moved: Vec<AuditLog> = queued.drain(..take).collect();
+        let count = moved.len();
+        self.chained
+            .lock()
+            .map_err(|e| PortError::database(e.to_string()))?
+            .extend(moved);
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    async fn pending(&self) -> Result<u64, PortError> {
+        Ok(self.queued.lock().map(|q| q.len() as u64).unwrap_or(0))
+    }
+}
+
+fn audit_log(n: u32) -> AuditLog {
+    AuditLog::new(
+        None,
+        None,
+        None,
+        RequestId::new(),
+        "outbox.fake",
+        AuditEventStatus::Success,
+        serde_json::json!({ "n": n }),
+    )
+}
+
+/// The guarantee behind A-02: a saturated in-memory queue no longer loses audit events.
+#[tokio::test]
+async fn audit_events_are_not_dropped_when_the_memory_queue_is_full() {
+    let (bus, mut rx) = EventBus::new(1);
+    let outbox = Arc::new(FakeOutbox::default());
+    let bus = bus.with_audit_outbox(outbox.clone());
+
+    for n in 0..20 {
+        bus.record_audit(audit_log(n)).await;
+    }
+
+    assert_eq!(
+        outbox.pending().await.unwrap_or(0),
+        20,
+        "all 20 must be durable"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "the memory queue is not used when the outbox works"
+    );
+}
+
+#[tokio::test]
+async fn audit_falls_back_to_the_memory_queue_when_the_outbox_fails() {
+    let (bus, mut rx) = EventBus::new(8);
+    let outbox = Arc::new(FakeOutbox {
+        fail_enqueue: true,
+        ..Default::default()
+    });
+    let bus = bus.with_audit_outbox(outbox);
+
+    bus.record_audit(audit_log(1)).await;
+
+    assert!(
+        matches!(rx.try_recv(), Ok(AppEvent::LogAudit(_))),
+        "entry must reach the in-memory fallback"
+    );
+}
+
+#[tokio::test]
+async fn without_an_outbox_audit_still_uses_the_memory_queue() {
+    let (bus, mut rx) = EventBus::new(8);
+    bus.record_audit(audit_log(1)).await;
+    assert!(matches!(rx.try_recv(), Ok(AppEvent::LogAudit(_))));
+}
+
+#[tokio::test]
+async fn worker_drains_the_outbox_when_woken_and_on_shutdown_drain() -> TestResult {
+    let outbox = Arc::new(FakeOutbox::default());
+    let (bus, rx) = EventBus::new(8);
+    let bus = bus.with_audit_outbox(outbox.clone());
+    let worker = EventWorker::new(
+        rx,
+        Arc::new(ConsoleMailProvider::new("noreply@example.test")),
+        Arc::new(RecordingAuditRepo::default()),
+        "https://example.test".to_owned(),
+    )
+    .with_audit_outbox(
+        outbox.clone(),
+        bus.audit_outbox_wake(),
+        10,
+        Duration::from_secs(3_600), // only the wake-up can trigger this drain
+    );
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let handle = tokio::spawn(worker.run(stop_rx));
+
+    bus.record_audit(audit_log(1)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while outbox.chained.lock().map(|c| c.len()).unwrap_or(0) < 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| "worker did not drain the outbox after being woken")?;
+
+    // Entries left behind are flushed on shutdown.
+    bus.record_audit(audit_log(2)).await;
+    stop_tx.send(true)?;
+    tokio::time::timeout(Duration::from_secs(2), handle).await??;
+    assert_eq!(outbox.chained.lock().map_err(|e| e.to_string())?.len(), 2);
+    assert_eq!(outbox.pending().await?, 0);
+    Ok(())
+}

@@ -10,7 +10,7 @@ use crate::application::dto::passkeys::{
     PasskeyRegistrationFinishCommand, PasskeyRegistrationFinishResult,
 };
 use crate::application::error::AppError;
-use crate::application::workers::events::{AppEvent, EventBus};
+use crate::application::workers::events::EventBus;
 use crate::domain::entities::{AuditEventStatus, AuditLog, Passkey, audit_events};
 use crate::domain::errors::DomainError;
 use crate::domain::value_objects::{RequestId, UserId};
@@ -101,7 +101,7 @@ impl FinishPasskeyRegistrationUseCase {
                 "passkey_name": passkey.name,
             }),
         );
-        self.event_bus.dispatch(AppEvent::LogAudit(Box::new(audit)));
+        self.event_bus.record_audit(audit).await;
 
         Ok(PasskeyRegistrationFinishResult {
             id: passkey.id,

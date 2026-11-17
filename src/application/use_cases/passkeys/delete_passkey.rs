@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use crate::application::error::AppError;
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::entities::{AuditEventStatus, AuditLog, audit_events};
 use crate::domain::errors::DomainError;
 use crate::domain::value_objects::{PasskeyId, RequestId, UserId};
@@ -78,7 +78,7 @@ impl DeletePasskeyUseCase {
                 "passkey_name": passkey.name,
             }),
         );
-        self.event_bus.dispatch(AppEvent::LogAudit(Box::new(audit)));
+        self.event_bus.record_audit(audit).await;
 
         Ok(())
     }

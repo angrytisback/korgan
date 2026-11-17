@@ -5,7 +5,7 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use crate::application::error::AppError;
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::FieldViolation;
 use crate::domain::entities::{AccountStatus, AuditEventStatus, AuditLog, User, UserRole};
 use crate::domain::value_objects::{EmailAddress, RawPassword, RequestId};
@@ -84,7 +84,7 @@ impl BootstrapSuperadminUseCase {
         self.user_repo.create(&user).await?;
 
         self.event_bus
-            .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+            .record_audit(AuditLog::new(
                 Some(user.id),
                 None,
                 Some("korgan-cli-bootstrap".to_string()),
@@ -95,7 +95,8 @@ impl BootstrapSuperadminUseCase {
                     "email": user.email.as_str(),
                     "role": user.role.as_str(),
                 }),
-            ))));
+            ))
+            .await;
 
         Ok(user)
     }

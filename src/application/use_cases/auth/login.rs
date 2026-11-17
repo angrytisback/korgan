@@ -9,7 +9,7 @@ use validator::Validate;
 use crate::application::dto::{AuthTokensResult, LoginCommand, LoginOutcome, MfaChallengeResult};
 use crate::application::error::AppError;
 use crate::application::use_cases::token_utils::generate_opaque_token;
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::entities::audit_events;
 use crate::domain::entities::{AuditEventStatus, AuditLog, Session};
 use crate::domain::value_objects::{EmailAddress, RawPassword};
@@ -138,7 +138,7 @@ impl LoginUseCase {
 
         if !rate_status.allowed {
             self.event_bus
-                .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+                .record_audit(AuditLog::new(
                     None,
                     Some(cmd.ip_address),
                     cmd.user_agent.clone(),
@@ -146,7 +146,8 @@ impl LoginUseCase {
                     audit_events::LOGIN_FAILED,
                     AuditEventStatus::Blocked,
                     serde_json::json!({ "reason": "rate_limited" }),
-                ))));
+                ))
+                .await;
 
             return Err(AppError::RateLimited {
                 retry_after_secs: rate_status.retry_after_secs.unwrap_or(60),
@@ -174,7 +175,7 @@ impl LoginUseCase {
                 }
 
                 self.event_bus
-                    .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+                    .record_audit(AuditLog::new(
                         None,
                         Some(cmd.ip_address),
                         cmd.user_agent,
@@ -182,7 +183,8 @@ impl LoginUseCase {
                         audit_events::LOGIN_FAILED,
                         AuditEventStatus::Failure,
                         serde_json::json!({ "reason": "user_not_found" }),
-                    ))));
+                    ))
+                    .await;
 
                 return Err(AppError::InvalidCredentials);
             }
@@ -209,7 +211,7 @@ impl LoginUseCase {
 
         if let Err(domain_err) = can_login_res {
             self.event_bus
-                .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+                .record_audit(AuditLog::new(
                     Some(user.id),
                     Some(cmd.ip_address),
                     cmd.user_agent,
@@ -217,14 +219,15 @@ impl LoginUseCase {
                     audit_events::LOGIN_FAILED,
                     AuditEventStatus::Blocked,
                     serde_json::json!({ "reason": domain_err.to_string() }),
-                ))));
+                ))
+                .await;
 
             return Err(AppError::from(domain_err));
         }
 
         if user.password_hash.is_none() {
             self.event_bus
-                .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+                .record_audit(AuditLog::new(
                     Some(user.id),
                     Some(cmd.ip_address),
                     cmd.user_agent,
@@ -232,7 +235,8 @@ impl LoginUseCase {
                     audit_events::LOGIN_FAILED,
                     AuditEventStatus::Failure,
                     serde_json::json!({ "reason": "no_password_set" }),
-                ))));
+                ))
+                .await;
 
             return Err(AppError::from(crate::domain::DomainError::NoPasswordSet));
         }
@@ -254,7 +258,7 @@ impl LoginUseCase {
             let is_locked = locked_until.is_some_and(|until| until > now);
 
             self.event_bus
-                .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+                .record_audit(AuditLog::new(
                     Some(user.id),
                     Some(cmd.ip_address),
                     cmd.user_agent,
@@ -265,7 +269,8 @@ impl LoginUseCase {
                         "failed_attempts": failed_attempts,
                         "locked": is_locked
                     }),
-                ))));
+                ))
+                .await;
 
             return Err(AppError::InvalidCredentials);
         }
@@ -281,7 +286,7 @@ impl LoginUseCase {
 
         if let Err(domain_err) = fresh_user.can_login(now) {
             self.event_bus
-                .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+                .record_audit(AuditLog::new(
                     Some(fresh_user.id),
                     Some(cmd.ip_address),
                     cmd.user_agent,
@@ -289,7 +294,8 @@ impl LoginUseCase {
                     audit_events::LOGIN_FAILED,
                     AuditEventStatus::Blocked,
                     serde_json::json!({ "reason": domain_err.to_string() }),
-                ))));
+                ))
+                .await;
 
             return Err(AppError::from(domain_err));
         }
@@ -308,7 +314,7 @@ impl LoginUseCase {
                 .await?;
 
             self.event_bus
-                .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+                .record_audit(AuditLog::new(
                     Some(user.id),
                     Some(cmd.ip_address),
                     cmd.user_agent,
@@ -316,7 +322,8 @@ impl LoginUseCase {
                     audit_events::MFA_CHALLENGED,
                     AuditEventStatus::Success,
                     serde_json::json!({ "mfa_type": "totp" }),
-                ))));
+                ))
+                .await;
 
             return Ok(LoginOutcome::MfaRequired(MfaChallengeResult {
                 mfa_ticket: raw_ticket,
@@ -373,7 +380,7 @@ impl LoginUseCase {
         let access_token = self.token_signer.sign_access_token(&claims)?;
 
         self.event_bus
-            .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+            .record_audit(AuditLog::new(
                 Some(user.id),
                 Some(cmd.ip_address),
                 cmd.user_agent,
@@ -381,7 +388,8 @@ impl LoginUseCase {
                 audit_events::LOGIN_SUCCESS,
                 AuditEventStatus::Success,
                 serde_json::json!({ "session_id": session.id.to_string() }),
-            ))));
+            ))
+            .await;
 
         Ok(LoginOutcome::Authenticated(AuthTokensResult {
             access_token,

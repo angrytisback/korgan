@@ -6,7 +6,7 @@ use validator::Validate;
 
 use crate::application::dto::ChangePasswordCommand;
 use crate::application::error::AppError;
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::entities::audit_events;
 use crate::domain::entities::{AuditEventStatus, AuditLog};
 use crate::domain::errors::FieldViolation;
@@ -178,7 +178,7 @@ impl ChangePasswordUseCase {
         .await?;
 
         self.event_bus
-            .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+            .record_audit(AuditLog::new(
                 Some(user.id),
                 cmd.ip_address,
                 cmd.user_agent,
@@ -186,7 +186,8 @@ impl ChangePasswordUseCase {
                 audit_events::PASSWORD_CHANGED,
                 AuditEventStatus::Success,
                 serde_json::json!({}),
-            ))));
+            ))
+            .await;
 
         Ok(())
     }

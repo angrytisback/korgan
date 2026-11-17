@@ -4,13 +4,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::application::workers::events::AppEvent;
 use crate::domain::value_objects::EmailAddress;
-use crate::ports::repositories::{AuditLogRepository, SessionRepository, UserRepository};
+use crate::ports::repositories::{
+    AuditLogRepository, AuditOutbox, SessionRepository, UserRepository,
+};
 use crate::ports::services::MailProvider;
 use chrono::Utc;
 
@@ -20,6 +22,15 @@ pub struct EventWorker {
     mail_provider: Arc<dyn MailProvider>,
     audit_repo: Arc<dyn AuditLogRepository>,
     base_url: String,
+    outbox: Option<OutboxDrain>,
+}
+
+/// Durable audit outbox plus how the worker drains it.
+struct OutboxDrain {
+    outbox: Arc<dyn AuditOutbox>,
+    wake: Arc<Notify>,
+    batch_size: u32,
+    poll_interval: Duration,
 }
 
 impl std::fmt::Debug for EventWorker {
@@ -63,7 +74,28 @@ impl EventWorker {
             mail_provider,
             audit_repo,
             base_url,
+            outbox: None,
         }
+    }
+
+    /// Drains the durable audit outbox: immediately when `wake` is notified and
+    /// at least every `poll_interval` (which also picks up entries enqueued by
+    /// other replicas or left over from a crash).
+    #[must_use]
+    pub fn with_audit_outbox(
+        mut self,
+        outbox: Arc<dyn AuditOutbox>,
+        wake: Arc<Notify>,
+        batch_size: u32,
+        poll_interval: Duration,
+    ) -> Self {
+        self.outbox = Some(OutboxDrain {
+            outbox,
+            wake,
+            batch_size: batch_size.max(1),
+            poll_interval,
+        });
+        self
     }
 
     /// Runs the worker event loop until shutdown signal or channel closure.
@@ -83,8 +115,32 @@ impl EventWorker {
         // worker then runs until the event bus is closed.
         let mut stop_channel_open = true;
 
+        let wake = self.outbox.as_ref().map(|o| o.wake.clone());
+        let mut outbox_ticker = self.outbox.as_ref().map(|o| {
+            let mut ticker = tokio::time::interval(o.poll_interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker
+        });
+
         loop {
             tokio::select! {
+                () = async {
+                    match &wake {
+                        Some(wake) => wake.notified().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.drain_outbox().await;
+                }
+                () = async {
+                    match outbox_ticker.as_mut() {
+                        Some(ticker) => { ticker.tick().await; }
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.drain_outbox().await;
+                    self.report_outbox_backlog().await;
+                }
                 changed = shutdown.changed(), if stop_channel_open => {
                     match changed {
                         Ok(()) if *shutdown.borrow() => {
@@ -155,9 +211,41 @@ impl EventWorker {
     }
 
     /// Drains and processes all currently buffered events in the channel.
+    ///
+    /// Also empties the durable audit outbox, so short-lived processes (CLI
+    /// commands) leave nothing behind.
     pub async fn drain(&mut self) {
         while let Ok(event) = self.receiver.try_recv() {
             self.handle_event(event).await;
+        }
+        self.drain_outbox().await;
+    }
+
+    /// Moves queued audit entries into the chain, batch by batch, until the
+    /// outbox is empty or a batch fails (the next wake-up or tick retries).
+    async fn drain_outbox(&self) {
+        let Some(drain) = &self.outbox else {
+            return;
+        };
+        loop {
+            match drain.outbox.drain(drain.batch_size).await {
+                Ok(moved) if moved >= drain.batch_size => {}
+                Ok(_) => break,
+                Err(e) => {
+                    error!(error = %e, "failed to drain the audit outbox; will retry");
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Publishes the outbox backlog as a gauge.
+    async fn report_outbox_backlog(&self) {
+        let Some(drain) = &self.outbox else {
+            return;
+        };
+        if let Ok(pending) = drain.outbox.pending().await {
+            metrics::gauge!("korgan_audit_outbox_pending").set(pending as f64);
         }
     }
 

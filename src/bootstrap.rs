@@ -180,12 +180,20 @@ pub fn build_state(settings: Arc<Settings>) -> Result<(AppState, EventWorker), B
     )?);
 
     // 6. Asynchronous Event Bus & Background Worker
+    let audit_outbox = Arc::new(PostgresAuditLogRepository::new(pg_pool.clone()));
     let (event_bus, event_rx) = EventBus::new(settings.workers.event_queue_capacity);
+    let event_bus = event_bus.with_audit_outbox(audit_outbox.clone());
     let event_worker = EventWorker::new(
         event_rx,
         mail_provider.clone(),
         audit_repo.clone(),
         settings.server.public_base_url.clone(),
+    )
+    .with_audit_outbox(
+        audit_outbox,
+        event_bus.audit_outbox_wake(),
+        settings.workers.audit_outbox_batch_size,
+        Duration::from_millis(settings.workers.audit_outbox_poll_ms),
     );
 
     let state = AppState::with_ports(

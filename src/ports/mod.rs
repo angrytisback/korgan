@@ -15,7 +15,7 @@ pub mod services;
 pub use cache::{RateLimitStatus, RateLimiterPort, TokenStore, WsTicketPayload};
 pub use errors::{BoxError, PortError};
 pub use repositories::{
-    AuditLogRepository, OAuthAccountRepository, PasskeyRepository, SessionRepository,
+    AuditLogRepository, AuditOutbox, OAuthAccountRepository, PasskeyRepository, SessionRepository,
     UserRepository,
 };
 pub use services::{

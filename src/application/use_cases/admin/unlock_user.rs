@@ -5,7 +5,7 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use crate::application::error::AppError;
-use crate::application::workers::{AppEvent, EventBus};
+use crate::application::workers::EventBus;
 use crate::domain::entities::{AuditEventStatus, AuditLog};
 use crate::domain::value_objects::{EmailAddress, RequestId};
 use crate::ports::repositories::UserRepository;
@@ -52,7 +52,7 @@ impl UnlockUserUseCase {
         self.user_repo.reset_failed_logins(&user.id, now).await?;
 
         self.event_bus
-            .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+            .record_audit(AuditLog::new(
                 Some(user.id),
                 None,
                 Some("korgan-cli-unlock".to_string()),
@@ -62,7 +62,8 @@ impl UnlockUserUseCase {
                 serde_json::json!({
                     "email": user.email.as_str(),
                 }),
-            ))));
+            ))
+            .await;
 
         Ok(())
     }

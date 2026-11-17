@@ -117,7 +117,7 @@ impl RegisterUserUseCase {
         });
 
         self.event_bus
-            .dispatch(AppEvent::LogAudit(Box::new(AuditLog::new(
+            .record_audit(AuditLog::new(
                 Some(user.id),
                 cmd.ip_address,
                 cmd.user_agent,
@@ -125,7 +125,8 @@ impl RegisterUserUseCase {
                 audit_events::REGISTER,
                 AuditEventStatus::Success,
                 serde_json::json!({ "email": user.email.as_str() }),
-            ))));
+            ))
+            .await;
 
         Ok(RegisterResult {
             user_id: user.id,
