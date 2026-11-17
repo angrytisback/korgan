@@ -4,10 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::watch;
-use tracing::{debug, error, info};
+use tokio::sync::{Semaphore, watch};
+use tokio::task::JoinSet;
+use tracing::{debug, error, info, warn};
 
 use crate::application::workers::events::AppEvent;
+use crate::domain::value_objects::EmailAddress;
 use crate::ports::repositories::{AuditLogRepository, SessionRepository, UserRepository};
 use crate::ports::services::MailProvider;
 use chrono::Utc;
@@ -28,6 +30,25 @@ impl std::fmt::Debug for EventWorker {
     }
 }
 
+/// Maximum number of e-mails delivered concurrently by [`EventWorker::run`].
+const MAIL_CONCURRENCY: usize = 8;
+
+/// Maximum number of e-mail deliveries queued or in flight; further e-mail
+/// events are dropped (and counted) instead of growing memory without bound.
+const MAIL_MAX_PENDING: usize = 256;
+
+/// Upper bound for a single e-mail delivery attempt.
+const MAIL_SEND_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A rendered outbound e-mail.
+struct OutboundMail {
+    to: EmailAddress,
+    subject: &'static str,
+    text: String,
+    html: String,
+    kind: &'static str,
+}
+
 impl EventWorker {
     /// Creates a new [`EventWorker`].
     #[must_use]
@@ -46,8 +67,15 @@ impl EventWorker {
     }
 
     /// Runs the worker event loop until shutdown signal or channel closure.
+    ///
+    /// Audit events are persisted in order on this task. E-mails are delivered
+    /// on separate tasks with bounded concurrency and a per-send timeout, so a
+    /// slow mail server can never delay audit persistence.
     pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
         info!("event worker background task started");
+
+        let mail_slots = Arc::new(Semaphore::new(MAIL_CONCURRENCY));
+        let mut mail_tasks: JoinSet<()> = JoinSet::new();
 
         // When every stop sender is gone (embedded use via `build_app`) the stop
         // branch is disabled instead of polled: a closed `watch` channel resolves
@@ -70,9 +98,14 @@ impl EventWorker {
                         }
                     }
                 }
+                Some(joined) = mail_tasks.join_next(), if !mail_tasks.is_empty() => {
+                    if let Err(e) = joined {
+                        error!(error = %e, "mail delivery task failed");
+                    }
+                }
                 maybe_event = self.receiver.recv() => {
                     match maybe_event {
-                        Some(event) => self.handle_event(event).await,
+                        Some(event) => self.route_event(event, &mut mail_tasks, &mail_slots).await,
                         None => {
                             info!("event worker channel closed; stopping");
                             break;
@@ -84,7 +117,41 @@ impl EventWorker {
 
         // Drain any remaining buffered events before completing shutdown
         self.drain().await;
+        while let Some(joined) = mail_tasks.join_next().await {
+            if let Err(e) = joined {
+                error!(error = %e, "mail delivery task failed");
+            }
+        }
         info!("event worker drained all pending events and stopped");
+    }
+
+    /// Persists audit events inline and hands e-mails to the bounded mail pool.
+    async fn route_event(
+        &self,
+        event: AppEvent,
+        mail_tasks: &mut JoinSet<()>,
+        mail_slots: &Arc<Semaphore>,
+    ) {
+        let Some(mail) = self.render_mail(&event) else {
+            self.handle_event(event).await;
+            return;
+        };
+
+        if mail_tasks.len() >= MAIL_MAX_PENDING {
+            metrics::counter!("korgan_events_dropped_total", "kind" => mail.kind, "reason" => "mail_backlog")
+                .increment(1);
+            warn!(kind = mail.kind, "mail backlog full; e-mail dropped");
+            return;
+        }
+
+        let provider = self.mail_provider.clone();
+        let slots = mail_slots.clone();
+        mail_tasks.spawn(async move {
+            let Ok(_permit) = slots.acquire_owned().await else {
+                return;
+            };
+            deliver_mail(provider.as_ref(), &mail).await;
+        });
     }
 
     /// Drains and processes all currently buffered events in the channel.
@@ -94,63 +161,76 @@ impl EventWorker {
         }
     }
 
-    /// Dispatches a single background event.
+    /// Processes a single background event to completion.
     pub async fn handle_event(&self, event: AppEvent) {
+        if let Some(mail) = self.render_mail(&event) {
+            deliver_mail(self.mail_provider.as_ref(), &mail).await;
+            return;
+        }
+        if let AppEvent::LogAudit(mut entry) = event
+            && let Err(e) = self.audit_repo.append_and_chain(&mut entry).await
+        {
+            error!(
+                error = %e,
+                event_type = %entry.event_type,
+                request_id = %entry.request_id,
+                "failed to append audit log"
+            );
+        }
+    }
+
+    /// Renders e-mail events; returns `None` for non-mail events.
+    fn render_mail(&self, event: &AppEvent) -> Option<OutboundMail> {
+        let base = self.base_url.trim_end_matches('/');
         match event {
             AppEvent::SendVerificationEmail { to, token } => {
-                let link = format!(
-                    "{}/verify-email?token={}",
-                    self.base_url.trim_end_matches('/'),
-                    token
-                );
-                let subject = "Verify your email address";
-                let text = format!(
-                    "Please verify your email address by visiting:\n{link}\n\nThis link will expire in 24 hours."
-                );
-                let html = format!(
-                    "<p>Please verify your email address by clicking <a href=\"{link}\">here</a>.</p><p>This link will expire in 24 hours.</p>"
-                );
-
-                if let Err(e) = self
-                    .mail_provider
-                    .send_email(&to, subject, &text, &html)
-                    .await
-                {
-                    error!(error = %e, recipient = %to, "failed to dispatch verification email");
-                }
+                let link = format!("{base}/verify-email?token={token}");
+                Some(OutboundMail {
+                    to: to.clone(),
+                    subject: "Verify your email address",
+                    text: format!(
+                        "Please verify your email address by visiting:\n{link}\n\nThis link will expire in 24 hours."
+                    ),
+                    html: format!(
+                        "<p>Please verify your email address by clicking <a href=\"{link}\">here</a>.</p><p>This link will expire in 24 hours.</p>"
+                    ),
+                    kind: "verification_email",
+                })
             }
             AppEvent::SendPasswordResetEmail { to, token } => {
-                let link = format!(
-                    "{}/reset-password?token={}",
-                    self.base_url.trim_end_matches('/'),
-                    token
-                );
-                let subject = "Reset your password";
-                let text = format!(
-                    "You requested a password reset. Visit the link below to set a new password:\n{link}\n\nThis link will expire in 1 hour.\nIf you did not request this, you can ignore this email."
-                );
-                let html = format!(
-                    "<p>You requested a password reset. Click <a href=\"{link}\">here</a> to set a new password.</p><p>This link will expire in 1 hour.</p><p>If you did not request this, you can ignore this email.</p>"
-                );
+                let link = format!("{base}/reset-password?token={token}");
+                Some(OutboundMail {
+                    to: to.clone(),
+                    subject: "Reset your password",
+                    text: format!(
+                        "You requested a password reset. Visit the link below to set a new password:\n{link}\n\nThis link will expire in 1 hour.\nIf you did not request this, you can ignore this email."
+                    ),
+                    html: format!(
+                        "<p>You requested a password reset. Click <a href=\"{link}\">here</a> to set a new password.</p><p>This link will expire in 1 hour.</p><p>If you did not request this, you can ignore this email.</p>"
+                    ),
+                    kind: "password_reset_email",
+                })
+            }
+            AppEvent::LogAudit(_) => None,
+        }
+    }
+}
 
-                if let Err(e) = self
-                    .mail_provider
-                    .send_email(&to, subject, &text, &html)
-                    .await
-                {
-                    error!(error = %e, recipient = %to, "failed to dispatch password reset email");
-                }
-            }
-            AppEvent::LogAudit(mut entry) => {
-                if let Err(e) = self.audit_repo.append_and_chain(&mut entry).await {
-                    error!(
-                        error = %e,
-                        event_type = %entry.event_type,
-                        request_id = %entry.request_id,
-                        "failed to append audit log"
-                    );
-                }
-            }
+/// Delivers one e-mail, bounded by [`MAIL_SEND_TIMEOUT`]; failures are logged.
+async fn deliver_mail(provider: &dyn MailProvider, mail: &OutboundMail) {
+    let send = provider.send_email(&mail.to, mail.subject, &mail.text, &mail.html);
+    match tokio::time::timeout(MAIL_SEND_TIMEOUT, send).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            error!(error = %e, recipient = %mail.to, kind = mail.kind, "failed to dispatch e-mail");
+        }
+        Err(_) => {
+            error!(
+                timeout_secs = MAIL_SEND_TIMEOUT.as_secs(),
+                recipient = %mail.to,
+                kind = mail.kind,
+                "e-mail delivery timed out"
+            );
         }
     }
 }
