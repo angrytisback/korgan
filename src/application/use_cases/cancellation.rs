@@ -8,6 +8,23 @@ use crate::application::error::AppError;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 
+/// Maximum number of attempts for a shielded side-effect.
+const SHIELDED_MAX_ATTEMPTS: u32 = 3;
+
+/// Delay before the first retry; doubled after every failed attempt.
+const SHIELDED_INITIAL_BACKOFF: Duration = Duration::from_millis(25);
+
+/// Whether retrying could help: dependency outages and unexpected failures
+/// are retried, deterministic outcomes (conflict, forbidden, ...) are not.
+const fn is_transient(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::Internal { .. } | AppError::ServiceUnavailable
+    )
+}
+
+// Process-wide on purpose: a process has exactly one shutdown drain, and the
+// counter must see tasks spawned from every use case.
 static ACTIVE_SHIELDED_TASKS: AtomicUsize = AtomicUsize::new(0);
 static SHIELDED_DRAIN_NOTIFY: Notify = Notify::const_new();
 
@@ -59,7 +76,8 @@ pub async fn wait_for_shielded_tasks(timeout: Duration) -> bool {
 }
 
 /// Shields an asynchronous side-effect (such as Redis blacklist dual-write) from future cancellation,
-/// with a 3-attempt exponential backoff retry for transient network dropouts.
+/// with a 3-attempt exponential backoff retry for transient failures only
+/// (`Internal`, `ServiceUnavailable`); deterministic errors are returned at once.
 ///
 /// Spawns the operation onto the Tokio runtime and awaits its completion.
 /// If the calling future is dropped before completion (e.g. client disconnect / Request Drop in Axum),
@@ -82,12 +100,12 @@ where
     let handle = tokio::spawn(async move {
         let _guard = guard;
         let mut attempts = 0u32;
-        let mut backoff = Duration::from_millis(25);
+        let mut backoff = SHIELDED_INITIAL_BACKOFF;
         loop {
             attempts += 1;
             match op().await {
                 Ok(val) => return Ok(val),
-                Err(err) if attempts < 3 => {
+                Err(err) if attempts < SHIELDED_MAX_ATTEMPTS && is_transient(&err) => {
                     tracing::warn!(
                         attempt = attempts,
                         error = %err,
