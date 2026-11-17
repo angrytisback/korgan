@@ -231,7 +231,7 @@ All endpoints are mounted under /api/v1 (except root health, discovery, and docu
 | GET /health | Anonymous | HTTP Any | 200 OK | Liveness probe: confirms HTTP listener is active. Does not probe databases. |
 | GET /health/live | Anonymous | HTTP Any | 200 OK | Alias for liveness probe. |
 | GET /health/ready | Anonymous | HTTP Any | 200 OK | Readiness probe: checks PostgreSQL and Redis connections. Returns 503 on partition. |
-| GET /metrics | Anonymous | HTTP Any | 200 OK | Prometheus metrics exposition endpoint for latency, requests, and active sessions. |
+| GET /metrics | Anonymous | HTTP Any | 200 OK | Prometheus metrics exposition endpoint for latency, requests, and active sessions. Moves to a dedicated listener when `server.metrics_addr` is set. |
 | GET /.well-known/jwks.json | Anonymous | HTTP Any | 200 OK | Public JWKS Discovery: serves RFC 7517 / RFC 8037 Ed25519 verifying keys. |
 | GET /openapi.json | Anonymous | HTTP Any | 200 OK | Raw machine-readable OpenAPI 3.1 schema. |
 | GET /api-docs/openapi.json | Anonymous | HTTP Any | 200 OK | Alias for OpenAPI specification. |
@@ -308,7 +308,7 @@ cargo run --release
 
 ## 8. Test Suite and Verification Gates
 
-All CI/CD checks pass locally with zero warnings and zero errors under strict denial flags:
+All CI/CD checks pass locally with zero warnings and zero errors under strict denial flags. `make check` runs the formatting, lint, boundary, rustdoc (`-D warnings`) and test gates in one go (`make help` lists every target); `make msrv` checks the declared minimum Rust version (1.94). The test suite uses in-memory fakes, so no PostgreSQL or Redis is needed to run it.
 
 | Verification Stage | Command Line Invocation | Verification Target | Result |
 | :--- | :--- | :--- | :--- |
@@ -316,7 +316,7 @@ All CI/CD checks pass locally with zero warnings and zero errors under strict de
 | Code Formatting | cargo fmt --all -- --check | Asserts compliance with standard Rust formatting | Clean (0 diff) |
 | Static Analysis & Lints | SQLX_OFFLINE=true cargo clippy --all-targets --all-features -- -D warnings | Denies all warnings, clippy panics, and unwrap/expect calls | Clean (0 warnings, 0 errors) |
 | Dependency Vulnerability Audit | cargo audit --deny warnings | Scans Cargo.lock against the RustSec Advisory Database | Clean (0 vulnerabilities across 455 crates) |
-| Comprehensive Test Suite | SQLX_OFFLINE=true cargo test | Executes all unit, integration, concurrency, and E2E test suites | 211 / 211 Passed (100% success rate) |
+| Comprehensive Test Suite | SQLX_OFFLINE=true cargo test | Executes all unit, integration, concurrency, and E2E test suites | 279 / 279 Passed (100% success rate) |
 
 --------------------------------------------------------------------------------
 

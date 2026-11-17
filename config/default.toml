@@ -27,6 +27,9 @@ cors_allowed_origins = ["http://localhost:3000"]
 request_body_limit_bytes = 1048576
 request_timeout_secs = 30
 shutdown_grace_secs = 30
+# Optional dedicated listener for /metrics (ip:port). When set, /metrics is no
+# longer served on the public listener. Example: "127.0.0.1:9100"
+# metrics_addr = "127.0.0.1:9100"
 
 [telemetry]
 # "pretty" (local development) | "json" (production / log shippers)
