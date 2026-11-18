@@ -85,6 +85,12 @@ pub enum ConfigError {
     Invalid(Vec<String>),
 }
 
+/// Base64 body of the throwaway Ed25519 test key; never accepted in production.
+const KNOWN_TEST_ED25519_KEY_BODY: &str =
+    "MC4CAQAwBQYDK2VwBCIEIFSBy32VLsvjiPTGXm9ph2VZP5r6FjDhPLO303Qtn3P7";
+/// Throwaway AES-256 master key used by tests; never accepted in production.
+const KNOWN_TEST_AES_KEY: &str = "EoX9enVeNrsuJbH6JMOBqg7qEq9/41ceeI0Q6S4lyAA=";
+
 /// Deployment environment. `production` enables stricter validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -741,6 +747,24 @@ impl Settings {
         if let Err(problem) = crypto.decode_aes_master_key() {
             problems.push(problem);
         }
+        if self.is_production() {
+            if crypto
+                .ed25519_private_key_pem
+                .expose_secret()
+                .contains(KNOWN_TEST_ED25519_KEY_BODY)
+            {
+                problems.push(
+                    "crypto.ed25519_private_key_pem is a publicly known test key and is forbidden in production"
+                        .to_owned(),
+                );
+            }
+            if crypto.aes_master_key.expose_secret().trim() == KNOWN_TEST_AES_KEY {
+                problems.push(
+                    "crypto.aes_master_key is a publicly known test key and is forbidden in production"
+                        .to_owned(),
+                );
+            }
+        }
     }
 
     fn validate_auth(&self, problems: &mut Vec<String>) {
@@ -1084,6 +1108,14 @@ mod tests {
         let mut env = base_env();
         env.extend([
             (
+                "KORGAN__CRYPTO__ED25519_PRIVATE_KEY_PEM".to_owned(),
+                "-----BEGIN PRIVATE KEY-----\\nMC4CAQAwBQYDK2VwBCIEIGmqS8Rrsu1ezj6/r3jUR68wWBl0WT1xiexK/QbsuPjc\\n-----END PRIVATE KEY-----".to_owned(),
+            ),
+            (
+                "KORGAN__CRYPTO__AES_MASTER_KEY".to_owned(),
+                "HuMTHVAWMNzc/x36rXRpA73/uCnapkiU78sPinUPZz4=".to_owned(),
+            ),
+            (
                 "KORGAN__SERVER__METRICS_ADDR".to_owned(),
                 "127.0.0.1:9100".to_owned(),
             ),
@@ -1262,6 +1294,32 @@ mod tests {
         let problems = problems_of(Settings::load_from_env(env));
         assert!(problems.iter().any(|p| p.contains("mail.provider")));
         assert!(problems.iter().any(|p| p.contains("hibp.enabled")));
+    }
+
+    #[test]
+    fn production_rejects_publicly_known_test_keys() {
+        let mut env = production_env();
+        env.extend([
+            (
+                "KORGAN__CRYPTO__ED25519_PRIVATE_KEY_PEM".to_owned(),
+                TEST_PEM.to_owned(),
+            ),
+            (
+                "KORGAN__CRYPTO__AES_MASTER_KEY".to_owned(),
+                TEST_AES.to_owned(),
+            ),
+        ]);
+        let problems = problems_of(Settings::load_from_env(env));
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("ed25519_private_key_pem") && p.contains("test key"))
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("aes_master_key") && p.contains("test key"))
+        );
     }
 
     #[test]

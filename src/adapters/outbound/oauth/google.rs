@@ -50,12 +50,15 @@ struct GoogleUserInfo {
 
 impl GoogleOAuthAdapter {
     /// Creates a new [`GoogleOAuthAdapter`].
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PortError`] if the hardened HTTP client cannot be built.
     pub fn new(
         client_id: impl Into<String>,
         client_secret: SecretString,
         redirect_uri: impl Into<String>,
-    ) -> Self {
+    ) -> Result<Self, PortError> {
         Self::with_endpoints(
             client_id,
             client_secret,
@@ -67,7 +70,11 @@ impl GoogleOAuthAdapter {
     }
 
     /// Creates an adapter with custom endpoints (useful for integration testing).
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PortError`] if the hardened HTTP client cannot be built; the
+    /// adapter never falls back to an unhardened client.
     pub fn with_endpoints(
         client_id: impl Into<String>,
         client_secret: SecretString,
@@ -75,17 +82,16 @@ impl GoogleOAuthAdapter {
         auth_url: impl Into<String>,
         token_url: impl Into<String>,
         userinfo_url: impl Into<String>,
-    ) -> Self {
+    ) -> Result<Self, PortError> {
         let token_url_str = token_url.into();
         let userinfo_url_str = userinfo_url.into();
 
         let allow_http =
             !token_url_str.starts_with("https://") || !userinfo_url_str.starts_with("https://");
         let client =
-            crate::adapters::outbound::http_client::create_hardened_client("google", allow_http)
-                .unwrap_or_default();
+            crate::adapters::outbound::http_client::create_hardened_client("google", allow_http)?;
 
-        Self {
+        Ok(Self {
             client,
             client_id: client_id.into(),
             client_secret,
@@ -93,7 +99,7 @@ impl GoogleOAuthAdapter {
             auth_url: auth_url.into(),
             token_url: token_url_str,
             userinfo_url: userinfo_url_str,
-        }
+        })
     }
 }
 
@@ -104,10 +110,16 @@ impl OAuthProviderPort for GoogleOAuthAdapter {
     }
 
     fn build_authorization_url(&self, state: &str) -> String {
-        format!(
-            "{}?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile&state={}&access_type=offline&prompt=select_account",
-            self.auth_url, self.client_id, self.redirect_uri, state
-        )
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("client_id", &self.client_id)
+            .append_pair("redirect_uri", &self.redirect_uri)
+            .append_pair("response_type", "code")
+            .append_pair("scope", "openid email profile")
+            .append_pair("state", state)
+            .append_pair("access_type", "offline")
+            .append_pair("prompt", "select_account")
+            .finish();
+        format!("{}?{query}", self.auth_url)
     }
 
     async fn exchange_code(&self, code: &str) -> Result<OAuthProfile, PortError> {
@@ -217,6 +229,22 @@ impl OAuthProviderPort for GoogleOAuthAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authorization_url_percent_encodes_all_parameters() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let adapter = GoogleOAuthAdapter::new(
+            "client id&x=1",
+            SecretString::from("secret"),
+            "https://app.example.com/cb?a=b&c=d",
+        )?;
+        let url = adapter.build_authorization_url("st&ate=evil");
+        assert!(url.contains("client_id=client+id%26x%3D1"));
+        assert!(url.contains("redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb%3Fa%3Db%26c%3Dd"));
+        assert!(url.contains("state=st%26ate%3Devil"));
+        assert!(!url.contains("&x=1") && !url.contains("&ate=evil"));
+        Ok(())
+    }
 
     #[test]
     fn test_google_user_info_deserialization() -> Result<(), Box<dyn std::error::Error>> {

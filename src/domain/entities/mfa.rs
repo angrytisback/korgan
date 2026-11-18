@@ -77,8 +77,9 @@ impl From<Vec<u8>> for AesNonce {
     #[inline]
     fn from(vec: Vec<u8>) -> Self {
         let mut arr = [0u8; 12];
-        let len = vec.len().min(12);
-        arr[..len].copy_from_slice(&vec[..len]);
+        for (dst, src) in arr.iter_mut().zip(vec.iter()) {
+            *dst = *src;
+        }
         Self(arr)
     }
 }
@@ -87,8 +88,9 @@ impl From<&[u8]> for AesNonce {
     #[inline]
     fn from(slice: &[u8]) -> Self {
         let mut arr = [0u8; 12];
-        let len = slice.len().min(12);
-        arr[..len].copy_from_slice(&slice[..len]);
+        for (dst, src) in arr.iter_mut().zip(slice.iter()) {
+            *dst = *src;
+        }
         Self(arr)
     }
 }
@@ -187,11 +189,10 @@ impl UserMfa {
         let mut matched_index = None;
 
         for i in 0..MAX_BACKUP_CODES {
-            let code_bytes = if i < self.backup_code_hashes.len() {
-                self.backup_code_hashes[i].as_bytes()
-            } else {
-                DUMMY_BACKUP_HASH
-            };
+            let code_bytes = self
+                .backup_code_hashes
+                .get(i)
+                .map_or(DUMMY_BACKUP_HASH, String::as_bytes);
 
             let is_match: bool = code_bytes.ct_eq(candidate_bytes).into();
             if is_match && i < self.backup_code_hashes.len() && matched_index.is_none() {
