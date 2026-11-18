@@ -1,0 +1,42 @@
+[package]
+name = "korgan-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+korgan = { path = ".." }
+
+[workspace]
+
+[[bin]]
+name = "jwt_verify"
+path = "fuzz_targets/jwt_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "value_objects"
+path = "fuzz_targets/value_objects.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "base32_roundtrip"
+path = "fuzz_targets/base32_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pending_totp_open"
+path = "fuzz_targets/pending_totp_open.rs"
+test = false
+doc = false
+bench = false

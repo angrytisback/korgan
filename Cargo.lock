@@ -1869,6 +1869,8 @@ dependencies = [
  "ed25519-dalek",
  "hmac",
  "http",
+ "hyper",
+ "hyper-util",
  "ipnetwork",
  "lettre",
  "libc",
