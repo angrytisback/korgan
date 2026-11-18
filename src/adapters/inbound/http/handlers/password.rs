@@ -66,6 +66,11 @@ impl std::fmt::Debug for ChangePasswordRequest {
 }
 
 /// Triggers password reset email workflow with anti-enumeration protection.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on validation failure, rate-limit exceeded, or
+/// internal storage/event dispatch error.
 #[utoipa::path(
     post,
     path = "/api/v1/password/forgot",
@@ -99,6 +104,11 @@ pub async fn forgot(
 }
 
 /// Completes password reset using a single-use token.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on invalid/expired reset token, validation or password
+/// policy/breach/history failure, rate-limit exceeded, or internal error.
 #[utoipa::path(
     post,
     path = "/api/v1/password/reset",
@@ -134,6 +144,12 @@ pub async fn reset(
 }
 
 /// Changes the authenticated caller's password.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on invalid current password, missing step-up
+/// authentication, password policy/history/breach rejection, rate-limit
+/// exceeded, or internal error.
 #[utoipa::path(
     post,
     path = "/api/v1/password/change",

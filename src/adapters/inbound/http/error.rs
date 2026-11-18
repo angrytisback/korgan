@@ -19,6 +19,8 @@
 //! Internal failure details (database, cache, library errors) are written to
 //! the log with the request id and are **never** part of the response body.
 
+use std::borrow::Cow;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::middleware::Next;
@@ -36,9 +38,6 @@ use crate::domain::value_objects::RequestId;
 
 /// Media type mandated by RFC 9457 Section 3.
 pub const PROBLEM_JSON: &str = "application/problem+json";
-
-/// Base of the stable, dereferenceable error type URIs.
-const TYPE_BASE_URI: &str = "https://errors.korgan.dev";
 
 /// Body used in the (practically unreachable) event that serialization fails.
 const FALLBACK_BODY: &[u8] =
@@ -90,137 +89,184 @@ pub enum ErrorKind {
 struct ErrorSpec {
     status: StatusCode,
     code: &'static str,
-    type_slug: &'static str,
+    type_uri: &'static str,
     title: &'static str,
     detail: &'static str,
 }
 
+impl ErrorSpec {
+    #[inline]
+    const fn new(
+        status: StatusCode,
+        code: &'static str,
+        type_uri: &'static str,
+        title: &'static str,
+        detail: &'static str,
+    ) -> Self {
+        Self {
+            status,
+            code,
+            type_uri,
+            title,
+            detail,
+        }
+    }
+}
+
 impl ErrorKind {
+    #[inline]
     const fn spec(self) -> ErrorSpec {
         match self {
-            Self::BadRequest => ErrorSpec {
-                status: StatusCode::BAD_REQUEST,
-                code: "REQUEST_MALFORMED",
-                type_slug: "request/malformed",
-                title: "Malformed Request",
-                detail: "The request could not be parsed. Check the syntax and try again.",
-            },
-            Self::ValidationFailed => ErrorSpec {
-                status: StatusCode::UNPROCESSABLE_ENTITY,
-                code: "VALIDATION_FAILED",
-                type_slug: "validation/failed",
-                title: "Validation Failed",
-                detail: "One or more fields are invalid. See `errors` for details.",
-            },
-            Self::InvalidCredentials => ErrorSpec {
-                status: StatusCode::UNAUTHORIZED,
-                code: "AUTH_INVALID_CREDENTIALS",
-                type_slug: "auth/invalid-credentials",
-                title: "Invalid Credentials",
-                detail: "Invalid credentials.",
-            },
-            Self::Unauthenticated => ErrorSpec {
-                status: StatusCode::UNAUTHORIZED,
-                code: "AUTH_UNAUTHENTICATED",
-                type_slug: "auth/unauthenticated",
-                title: "Authentication Required",
-                detail: "Valid authentication is required to access this resource.",
-            },
-            Self::TokenInvalid => ErrorSpec {
-                status: StatusCode::UNAUTHORIZED,
-                code: "AUTH_TOKEN_INVALID",
-                type_slug: "auth/token-invalid",
-                title: "Invalid Token",
-                detail: "The provided token is invalid.",
-            },
-            Self::TokenExpired => ErrorSpec {
-                status: StatusCode::UNAUTHORIZED,
-                code: "AUTH_TOKEN_EXPIRED",
-                type_slug: "auth/token-expired",
-                title: "Token Expired",
-                detail: "The provided token has expired.",
-            },
-            Self::TokenReuseDetected => ErrorSpec {
-                status: StatusCode::UNAUTHORIZED,
-                code: "AUTH_TOKEN_REUSE_DETECTED",
-                type_slug: "auth/token-reuse-detected",
-                title: "Refresh Token Reuse Detected",
-                detail: "The provided refresh token has already been rotated. For your security, the entire session family has been revoked.",
-            },
-            Self::Forbidden => ErrorSpec {
-                status: StatusCode::FORBIDDEN,
-                code: "AUTH_FORBIDDEN",
-                type_slug: "auth/forbidden",
-                title: "Forbidden",
-                detail: "You do not have permission to perform this action.",
-            },
-            Self::NotFound => ErrorSpec {
-                status: StatusCode::NOT_FOUND,
-                code: "RESOURCE_NOT_FOUND",
-                type_slug: "resource/not-found",
-                title: "Resource Not Found",
-                detail: "The requested resource does not exist.",
-            },
-            Self::MethodNotAllowed => ErrorSpec {
-                status: StatusCode::METHOD_NOT_ALLOWED,
-                code: "METHOD_NOT_ALLOWED",
-                type_slug: "request/method-not-allowed",
-                title: "Method Not Allowed",
-                detail: "The HTTP method is not supported for this resource.",
-            },
-            Self::RequestTimeout => ErrorSpec {
-                status: StatusCode::REQUEST_TIMEOUT,
-                code: "REQUEST_TIMEOUT",
-                type_slug: "request/timeout",
-                title: "Request Timeout",
-                detail: "The request took too long to process.",
-            },
-            Self::Conflict => ErrorSpec {
-                status: StatusCode::CONFLICT,
-                code: "RESOURCE_CONFLICT",
-                type_slug: "resource/conflict",
-                title: "Conflict",
-                detail: "The request conflicts with the current state of the resource.",
-            },
-            Self::PayloadTooLarge => ErrorSpec {
-                status: StatusCode::PAYLOAD_TOO_LARGE,
-                code: "PAYLOAD_TOO_LARGE",
-                type_slug: "request/payload-too-large",
-                title: "Payload Too Large",
-                detail: "The request body exceeds the maximum allowed size.",
-            },
-            Self::UnsupportedMediaType => ErrorSpec {
-                status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                code: "UNSUPPORTED_MEDIA_TYPE",
-                type_slug: "request/unsupported-media-type",
-                title: "Unsupported Media Type",
-                detail: "The request `Content-Type` is not supported.",
-            },
-            Self::RateLimited => ErrorSpec {
-                status: StatusCode::TOO_MANY_REQUESTS,
-                code: "RATE_LIMIT_EXCEEDED",
-                type_slug: "rate-limit/exceeded",
-                title: "Too Many Requests",
-                detail: "Rate limit exceeded. Retry after the number of seconds given in the `Retry-After` header.",
-            },
-            Self::Internal => ErrorSpec {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                code: "INTERNAL_ERROR",
-                type_slug: "server/internal-error",
-                title: "Internal Server Error",
-                detail: INTERNAL_DETAIL,
-            },
-            Self::ServiceUnavailable => ErrorSpec {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                code: "SERVICE_UNAVAILABLE",
-                type_slug: "server/service-unavailable",
-                title: "Service Unavailable",
-                detail: "The service is temporarily unavailable. Please retry later.",
-            },
+            Self::BadRequest
+            | Self::ValidationFailed
+            | Self::InvalidCredentials
+            | Self::Unauthenticated
+            | Self::TokenInvalid
+            | Self::TokenExpired
+            | Self::TokenReuseDetected
+            | Self::Forbidden => self.auth_and_validation_spec(),
+            _ => self.resource_and_server_spec(),
+        }
+    }
+
+    #[inline]
+    const fn auth_and_validation_spec(self) -> ErrorSpec {
+        match self {
+            Self::BadRequest => ErrorSpec::new(
+                StatusCode::BAD_REQUEST,
+                "REQUEST_MALFORMED",
+                concat!("https://errors.korgan.dev/", "request/malformed"),
+                "Malformed Request",
+                "The request could not be parsed. Check the syntax and try again.",
+            ),
+            Self::ValidationFailed => ErrorSpec::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "VALIDATION_FAILED",
+                concat!("https://errors.korgan.dev/", "validation/failed"),
+                "Validation Failed",
+                "One or more fields are invalid. See `errors` for details.",
+            ),
+            Self::InvalidCredentials => ErrorSpec::new(
+                StatusCode::UNAUTHORIZED,
+                "AUTH_INVALID_CREDENTIALS",
+                concat!("https://errors.korgan.dev/", "auth/invalid-credentials"),
+                "Invalid Credentials",
+                "Invalid credentials.",
+            ),
+            Self::Unauthenticated => ErrorSpec::new(
+                StatusCode::UNAUTHORIZED,
+                "AUTH_UNAUTHENTICATED",
+                concat!("https://errors.korgan.dev/", "auth/unauthenticated"),
+                "Authentication Required",
+                "Valid authentication is required to access this resource.",
+            ),
+            Self::TokenInvalid => ErrorSpec::new(
+                StatusCode::UNAUTHORIZED,
+                "AUTH_TOKEN_INVALID",
+                concat!("https://errors.korgan.dev/", "auth/token-invalid"),
+                "Invalid Token",
+                "The provided token is invalid.",
+            ),
+            Self::TokenExpired => ErrorSpec::new(
+                StatusCode::UNAUTHORIZED,
+                "AUTH_TOKEN_EXPIRED",
+                concat!("https://errors.korgan.dev/", "auth/token-expired"),
+                "Token Expired",
+                "The provided token has expired.",
+            ),
+            Self::TokenReuseDetected => ErrorSpec::new(
+                StatusCode::UNAUTHORIZED,
+                "AUTH_TOKEN_REUSE_DETECTED",
+                concat!("https://errors.korgan.dev/", "auth/token-reuse-detected"),
+                "Refresh Token Reuse Detected",
+                "The provided refresh token has already been rotated. For your security, the entire session family has been revoked.",
+            ),
+            Self::Forbidden => ErrorSpec::new(
+                StatusCode::FORBIDDEN,
+                "AUTH_FORBIDDEN",
+                concat!("https://errors.korgan.dev/", "auth/forbidden"),
+                "Forbidden",
+                "You do not have permission to perform this action.",
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    #[inline]
+    const fn resource_and_server_spec(self) -> ErrorSpec {
+        match self {
+            Self::NotFound => ErrorSpec::new(
+                StatusCode::NOT_FOUND,
+                "RESOURCE_NOT_FOUND",
+                concat!("https://errors.korgan.dev/", "resource/not-found"),
+                "Resource Not Found",
+                "The requested resource does not exist.",
+            ),
+            Self::MethodNotAllowed => ErrorSpec::new(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "METHOD_NOT_ALLOWED",
+                concat!("https://errors.korgan.dev/", "request/method-not-allowed"),
+                "Method Not Allowed",
+                "The HTTP method is not supported for this resource.",
+            ),
+            Self::RequestTimeout => ErrorSpec::new(
+                StatusCode::REQUEST_TIMEOUT,
+                "REQUEST_TIMEOUT",
+                concat!("https://errors.korgan.dev/", "request/timeout"),
+                "Request Timeout",
+                "The request took too long to process.",
+            ),
+            Self::Conflict => ErrorSpec::new(
+                StatusCode::CONFLICT,
+                "RESOURCE_CONFLICT",
+                concat!("https://errors.korgan.dev/", "resource/conflict"),
+                "Conflict",
+                "The request conflicts with the current state of the resource.",
+            ),
+            Self::PayloadTooLarge => ErrorSpec::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "PAYLOAD_TOO_LARGE",
+                concat!("https://errors.korgan.dev/", "request/payload-too-large"),
+                "Payload Too Large",
+                "The request body exceeds the maximum allowed size.",
+            ),
+            Self::UnsupportedMediaType => ErrorSpec::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "UNSUPPORTED_MEDIA_TYPE",
+                concat!(
+                    "https://errors.korgan.dev/",
+                    "request/unsupported-media-type"
+                ),
+                "Unsupported Media Type",
+                "The request `Content-Type` is not supported.",
+            ),
+            Self::RateLimited => ErrorSpec::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "RATE_LIMIT_EXCEEDED",
+                concat!("https://errors.korgan.dev/", "rate-limit/exceeded"),
+                "Too Many Requests",
+                "Rate limit exceeded. Retry after the number of seconds given in the `Retry-After` header.",
+            ),
+            Self::Internal => ErrorSpec::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                concat!("https://errors.korgan.dev/", "server/internal-error"),
+                "Internal Server Error",
+                INTERNAL_DETAIL,
+            ),
+            Self::ServiceUnavailable => ErrorSpec::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_UNAVAILABLE",
+                concat!("https://errors.korgan.dev/", "server/service-unavailable"),
+                "Service Unavailable",
+                "The service is temporarily unavailable. Please retry later.",
+            ),
+            _ => unreachable!(),
         }
     }
 
     /// Chooses the best-matching kind for an arbitrary HTTP status code.
+    #[inline]
     #[must_use]
     pub const fn from_status(status: StatusCode) -> Self {
         match status.as_u16() {
@@ -258,10 +304,10 @@ pub struct ProblemDetails {
     /// URI reference identifying the problem type.
     #[serde(rename = "type")]
     #[schema(example = "https://errors.korgan.dev/auth/token-reuse-detected")]
-    pub type_uri: String,
+    pub type_uri: Cow<'static, str>,
     /// Short, human-readable summary of the problem type.
     #[schema(example = "Refresh Token Reuse Detected")]
-    pub title: String,
+    pub title: Cow<'static, str>,
     /// HTTP status code.
     #[schema(example = 401)]
     pub status: u16,
@@ -269,13 +315,13 @@ pub struct ProblemDetails {
     #[schema(
         example = "The provided refresh token has already been rotated. For your security, the entire session family has been revoked."
     )]
-    pub detail: String,
+    pub detail: Cow<'static, str>,
     /// `urn:uuid:<request_id>` identifying this occurrence.
     #[schema(example = "urn:uuid:0192a8f0-7c1b-7000-8000-1a2b3c4d5e6f")]
     pub instance: String,
     /// Stable machine-readable error code.
     #[schema(example = "AUTH_TOKEN_REUSE_DETECTED")]
-    pub code: String,
+    pub code: Cow<'static, str>,
     /// When the error was produced (RFC 3339, UTC).
     #[serde(serialize_with = "serialize_rfc3339_secs")]
     #[schema(value_type = String, format = DateTime, example = "2026-10-20T11:20:00Z")]
@@ -297,7 +343,7 @@ fn serialize_rfc3339_secs<S: Serializer>(
 pub struct ApiError {
     kind: ErrorKind,
     status: StatusCode,
-    detail: Option<String>,
+    detail: Option<Cow<'static, str>>,
     errors: Vec<FieldError>,
     retry_after_secs: Option<u64>,
     /// Internal cause, logged but never serialized.
@@ -309,6 +355,7 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 impl ApiError {
     /// Creates an error of the given kind with its default status and detail.
+    #[inline]
     #[must_use]
     pub const fn new(kind: ErrorKind) -> Self {
         Self {
@@ -322,6 +369,7 @@ impl ApiError {
     }
 
     /// Creates an error from a status code, preserving the exact status.
+    #[inline]
     #[must_use]
     pub const fn from_status(status: StatusCode) -> Self {
         let mut error = Self::new(ErrorKind::from_status(status));
@@ -330,13 +378,15 @@ impl ApiError {
     }
 
     /// Overrides the human-readable detail (never put internal data here).
+    #[inline]
     #[must_use]
-    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+    pub fn with_detail(mut self, detail: impl Into<Cow<'static, str>>) -> Self {
         self.detail = Some(detail.into());
         self
     }
 
     /// Attaches field-level errors.
+    #[inline]
     #[must_use]
     pub fn with_errors(mut self, errors: Vec<FieldError>) -> Self {
         self.errors = errors;
@@ -344,6 +394,7 @@ impl ApiError {
     }
 
     /// Sets the `Retry-After` header value in seconds.
+    #[inline]
     #[must_use]
     pub const fn with_retry_after(mut self, seconds: u64) -> Self {
         self.retry_after_secs = Some(seconds);
@@ -351,12 +402,14 @@ impl ApiError {
     }
 
     /// The classification of this error.
+    #[inline]
     #[must_use]
     pub const fn kind(&self) -> ErrorKind {
         self.kind
     }
 
     /// The HTTP status that will be sent.
+    #[inline]
     #[must_use]
     pub const fn status(&self) -> StatusCode {
         self.status
@@ -367,15 +420,12 @@ impl ApiError {
     pub fn to_problem(&self, request_id: RequestId) -> ProblemDetails {
         let spec = self.kind.spec();
         ProblemDetails {
-            type_uri: format!("{TYPE_BASE_URI}/{}", spec.type_slug),
-            title: spec.title.to_owned(),
+            type_uri: Cow::Borrowed(spec.type_uri),
+            title: Cow::Borrowed(spec.title),
             status: self.status.as_u16(),
-            detail: self
-                .detail
-                .clone()
-                .unwrap_or_else(|| spec.detail.to_owned()),
+            detail: self.detail.clone().unwrap_or(Cow::Borrowed(spec.detail)),
             instance: request_id.as_instance_urn(),
-            code: spec.code.to_owned(),
+            code: Cow::Borrowed(spec.code),
             timestamp: Utc::now(),
             errors: self.errors.clone(),
         }
@@ -424,6 +474,7 @@ impl From<AppError> for ApiError {
 }
 
 impl From<DomainError> for ApiError {
+    #[inline]
     fn from(error: DomainError) -> Self {
         AppError::from(error).into()
     }
@@ -471,13 +522,13 @@ impl IntoResponse for ApiError {
         let headers = response.headers_mut();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_JSON));
         headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        if let Ok(value) = HeaderValue::from_str(&request_id.to_string()) {
+        let mut req_buf = [0u8; 36];
+        let req_id_str = request_id.encode_hyphenated(&mut req_buf);
+        if let Ok(value) = HeaderValue::from_bytes(req_id_str.as_bytes()) {
             headers.insert(X_REQUEST_ID.clone(), value);
         }
-        if let Some(seconds) = self.retry_after_secs
-            && let Ok(value) = HeaderValue::from_str(&seconds.to_string())
-        {
-            headers.insert(RETRY_AFTER, value);
+        if let Some(seconds) = self.retry_after_secs {
+            headers.insert(RETRY_AFTER, HeaderValue::from(seconds));
         }
 
         response
@@ -485,6 +536,7 @@ impl IntoResponse for ApiError {
 }
 
 /// Whether `headers` already declares a problem+json body.
+#[inline]
 fn is_problem_json(headers: &HeaderMap) -> bool {
     headers
         .get(CONTENT_TYPE)
@@ -561,7 +613,7 @@ mod tests {
         assert_eq!(problem.title, "Refresh Token Reuse Detected");
         assert_eq!(problem.status, 401);
         assert_eq!(problem.instance, format!("urn:uuid:{request_id}"));
-        assert!(problem.errors.is_empty());
+        assert_eq!(problem.errors, []);
         Ok(())
     }
 
@@ -672,5 +724,24 @@ mod tests {
             ApiError::from_status(StatusCode::URI_TOO_LONG).status(),
             StatusCode::URI_TOO_LONG
         );
+    }
+
+    #[test]
+    fn to_problem_borrows_static_strings_without_heap_allocation() {
+        let problem = ApiError::new(ErrorKind::Forbidden).to_problem(RequestId::new());
+        assert!(matches!(problem.type_uri, Cow::Borrowed(_)));
+        assert!(matches!(problem.title, Cow::Borrowed(_)));
+        assert!(matches!(problem.detail, Cow::Borrowed(_)));
+        assert!(matches!(problem.code, Cow::Borrowed(_)));
+
+        let static_override = ApiError::new(ErrorKind::Forbidden)
+            .with_detail("static override")
+            .to_problem(RequestId::new());
+        assert!(matches!(static_override.detail, Cow::Borrowed(_)));
+
+        let dynamic_override = ApiError::new(ErrorKind::Forbidden)
+            .with_detail(format!("dynamic {}", 123))
+            .to_problem(RequestId::new());
+        assert!(matches!(dynamic_override.detail, Cow::Owned(_)));
     }
 }

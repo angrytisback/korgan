@@ -1,4 +1,4 @@
-//! OAuth2 external authentication HTTP handlers.
+//! `OAuth2` external authentication HTTP handlers.
 //!
 //! * `GET /api/v1/auth/oauth/:provider/url` - generate authorization URL with CSRF state
 //! * `GET /api/v1/auth/oauth/:provider/callback` - process OAuth provider callback
@@ -29,7 +29,7 @@ pub struct OAuthUrlResponse {
     pub state: String,
 }
 
-/// Query parameters passed back by external OAuth2 identity providers.
+/// Query parameters passed back by external `OAuth2` identity providers.
 #[derive(Debug, Clone, Deserialize, IntoParams, ToSchema)]
 pub struct OAuthCallbackQuery {
     /// Authorization code issued by provider.
@@ -40,7 +40,12 @@ pub struct OAuthCallbackQuery {
     pub state: String,
 }
 
-/// Generates an external OAuth2 authorization URL.
+/// Generates an external `OAuth2` authorization URL.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] if the provider name is unsupported or CSRF state
+/// generation/caching fails.
 #[utoipa::path(
     get,
     path = "/api/v1/auth/oauth/{provider}/url",
@@ -82,7 +87,7 @@ pub async fn generate_url(
     ))
 }
 
-/// Processes an external OAuth2 identity provider callback.
+/// Processes an external `OAuth2` identity provider callback.
 #[utoipa::path(
     get,
     path = "/api/v1/auth/oauth/{provider}/callback",

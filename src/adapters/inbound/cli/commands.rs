@@ -62,7 +62,7 @@ pub async fn handle_audit_verify(state: &AppState) -> Result<(), CliError> {
                 "Audit log cryptographic chain is CORRUPTED! Tampered entry ID: {}, reason: {}",
                 broken.log_id, broken.reason
             );
-            Err(CliError::AuditCorrupted(broken.log_id.to_string()))
+            Err(CliError::AuditCorrupted(broken.log_id))
         }
         Err(e) => {
             eprintln!("Audit verification failed to read logs: {e}");

@@ -37,7 +37,7 @@ pub struct PasskeyRegistrationStartResponse {
 pub struct PasskeyRegistrationFinishRequest {
     /// Challenge identifier received from registration start.
     pub challenge_id: Uuid,
-    /// Optional label for the passkey device (e.g. "MacBook TouchID", "YubiKey").
+    /// Optional label for the passkey device (e.g. `MacBook` `TouchID`, `YubiKey`).
     pub name: Option<String>,
     /// WebAuthn registration credential from authenticator.
     #[schema(value_type = Object)]
@@ -89,6 +89,11 @@ pub struct PasskeyItemResponse {
 }
 
 /// Initiates WebAuthn passkey registration for the authenticated user.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on unauthenticated request, missing step-up
+/// authentication, or internal WebAuthn/cache failure.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/passkeys/register/start",
@@ -118,6 +123,11 @@ pub async fn register_start(
 }
 
 /// Completes WebAuthn passkey registration and persists the new credential.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on expired/invalid challenge, authentication or step-up
+/// failure, validation error, or internal storage error.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/passkeys/register/finish",
@@ -168,6 +178,10 @@ pub async fn register_finish(
 }
 
 /// Initiates discoverable passkey login (usernameless authentication).
+///
+/// # Errors
+///
+/// Returns [`ApiError`] if generating or caching the WebAuthn challenge fails.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/passkeys/login/start",
@@ -190,6 +204,11 @@ pub async fn login_start(
 }
 
 /// Completes discoverable passkey login, issuing access and refresh tokens.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on invalid/expired challenge or credential verification
+/// failure, or internal storage/crypto error.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/passkeys/login/finish",
@@ -228,6 +247,10 @@ pub async fn login_finish(
 }
 
 /// Lists all passkey credentials registered for the authenticated user.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on authentication or internal repository failures.
 #[utoipa::path(
     get,
     path = "/api/v1/users/me/passkeys",
@@ -263,6 +286,11 @@ pub async fn list(
 }
 
 /// Deletes a passkey credential owned by the authenticated user.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on authentication failure, ownership mismatch (403),
+/// missing passkey (404), or internal storage error.
 #[utoipa::path(
     delete,
     path = "/api/v1/users/me/passkeys/{id}",
