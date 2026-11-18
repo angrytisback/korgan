@@ -383,6 +383,7 @@ fn build_password_and_mfa_use_cases(
         ports.user_repo.clone(),
         totp_service.clone(),
         ports.token_store.clone(),
+        secret_cipher.clone(),
         "Korgan".to_owned(),
         Duration::from_secs(auth.mfa_challenge_ttl_secs),
     );
