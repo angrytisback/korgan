@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 
 use crate::application::dto::{EnableTotpCommand, TotpEnabledResult};
 use crate::application::error::AppError;
-use crate::application::use_cases::token_utils::{decode_base32, generate_backup_codes};
+use crate::application::use_cases::token_utils::{generate_backup_codes, open_pending_totp_secret};
 use crate::application::workers::EventBus;
 use crate::domain::entities::audit_events;
 use crate::domain::entities::{AuditEventStatus, AuditLog, UserMfa};
@@ -75,18 +75,14 @@ impl EnableTotpUseCase {
         let pending_key = format!("pending_totp:{}", cmd.user_id);
         let maybe_secret_str = self.token_store.get_token(&pending_key).await?;
 
-        let Some(secret_str) = maybe_secret_str.map(Zeroizing::new) else {
+        let Some(sealed) = maybe_secret_str.map(Zeroizing::new) else {
             return Err(AppError::TokenExpired);
         };
 
-        let Some(secret_bytes) = decode_base32(&secret_str).map(Zeroizing::new) else {
-            return Err(AppError::internal(
-                "corrupt pending TOTP secret",
-                std::io::Error::other("invalid base32"),
-            ));
-        };
-        // Zeroize and drop Base32 string immediately; it is not needed across .await.
-        drop(secret_str);
+        // The pending secret is cached AES-256-GCM sealed (user-bound AAD).
+        let secret_bytes =
+            open_pending_totp_secret(self.secret_cipher.as_ref(), &cmd.user_id, &sealed)?;
+        drop(sealed);
 
         let now = Utc::now();
         let now_secs = u64::try_from(now.timestamp()).unwrap_or(0);

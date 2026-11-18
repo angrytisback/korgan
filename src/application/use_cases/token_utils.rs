@@ -96,6 +96,54 @@ pub fn generate_opaque_token() -> (String, String) {
     (raw, hash)
 }
 
+/// Domain-separated AAD binding a pending (not yet activated) TOTP secret to its owner.
+fn pending_totp_aad(user_id: &crate::domain::value_objects::UserId) -> Vec<u8> {
+    let mut aad = b"KORGAN_PENDING_TOTP_V1\0".to_vec();
+    aad.extend_from_slice(user_id.as_bytes());
+    aad
+}
+
+/// Seals a pending TOTP secret for the cache as `base64url(nonce).base64url(ciphertext)`
+/// (AES-256-GCM, AAD bound to the user) so a cache dump never exposes it in clear.
+///
+/// # Errors
+///
+/// Returns [`PortError`] if encryption fails.
+pub fn seal_pending_totp_secret(
+    cipher: &dyn SecretCipher,
+    user_id: &crate::domain::value_objects::UserId,
+    secret: &[u8],
+) -> Result<String, PortError> {
+    let (ciphertext, nonce) = cipher.encrypt_with_aad(secret, &pending_totp_aad(user_id))?;
+    Ok(format!(
+        "{}.{}",
+        BASE64_URL_SAFE_NO_PAD.encode(nonce),
+        BASE64_URL_SAFE_NO_PAD.encode(ciphertext)
+    ))
+}
+
+/// Opens a value produced by [`seal_pending_totp_secret`].
+///
+/// # Errors
+///
+/// Returns [`PortError`] if the value is malformed or authentication fails.
+pub fn open_pending_totp_secret(
+    cipher: &dyn SecretCipher,
+    user_id: &crate::domain::value_objects::UserId,
+    sealed: &str,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, PortError> {
+    let malformed = || PortError::crypto("malformed sealed pending TOTP secret");
+    let (nonce_b64, ct_b64) = sealed.split_once('.').ok_or_else(malformed)?;
+    let nonce = BASE64_URL_SAFE_NO_PAD
+        .decode(nonce_b64)
+        .map_err(|_| malformed())?;
+    let ciphertext = BASE64_URL_SAFE_NO_PAD
+        .decode(ct_b64)
+        .map_err(|_| malformed())?;
+    let plain = cipher.decrypt_with_aad(&ciphertext, &nonce, &pending_totp_aad(user_id))?;
+    Ok(zeroize::Zeroizing::new(plain.as_bytes().to_vec()))
+}
+
 /// Derives the RFC 7636 `S256` PKCE `code_challenge` for a `code_verifier`
 /// (`BASE64URL(SHA256(verifier))`, unpadded).
 #[must_use]

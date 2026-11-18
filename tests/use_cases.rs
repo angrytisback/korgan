@@ -1312,6 +1312,7 @@ async fn test_mfa_setup_enable_and_verify_login() -> TestResult {
         user_repo.clone(),
         totp_service.clone(),
         token_store.clone(),
+        Arc::new(MockSecretCipher),
         "Korgan".to_owned(),
         Duration::from_secs(900),
     );
@@ -1908,6 +1909,7 @@ async fn test_totp_replay_prevention_and_ticket_single_use() -> TestResult {
         user_repo.clone(),
         totp_service.clone(),
         token_store.clone(),
+        Arc::new(MockSecretCipher),
         "Korgan".to_owned(),
         Duration::from_secs(900),
     );
@@ -2178,6 +2180,7 @@ async fn test_totp_concurrent_replay_race_condition() -> TestResult {
         user_repo.clone(),
         totp_service.clone(),
         token_store.clone(),
+        Arc::new(MockSecretCipher),
         "Korgan".to_owned(),
         Duration::from_secs(900),
     );
@@ -2337,6 +2340,7 @@ async fn test_backup_code_concurrent_consumption_race_condition() -> TestResult 
         user_repo.clone(),
         totp_service.clone(),
         token_store.clone(),
+        Arc::new(MockSecretCipher),
         "Korgan".to_owned(),
         Duration::from_secs(900),
     );
@@ -3887,6 +3891,7 @@ async fn test_mfa_enable_atomic_synchronization() -> TestResult {
         user_repo.clone(),
         totp_service.clone(),
         token_store.clone(),
+        Arc::new(MockSecretCipher),
         "Korgan".to_owned(),
         Duration::from_secs(900),
     );
@@ -4106,6 +4111,7 @@ async fn test_enable_totp_verify_code_error_propagates_without_side_effects() ->
         user_repo.clone(),
         totp_service.clone(),
         token_store.clone(),
+        Arc::new(MockSecretCipher),
         "Korgan".to_owned(),
         Duration::from_mins(15),
     );
@@ -4177,6 +4183,7 @@ async fn test_enable_totp_delete_token_error_propagates_without_side_effects() -
         user_repo.clone(),
         totp_service.clone(),
         token_store.clone(),
+        Arc::new(MockSecretCipher),
         "Korgan".to_owned(),
         Duration::from_mins(15),
     );
@@ -4241,6 +4248,7 @@ async fn test_enable_totp_encrypt_with_aad_error_propagates_without_side_effects
         user_repo.clone(),
         totp_service.clone(),
         token_store.clone(),
+        Arc::new(MockSecretCipher),
         "Korgan".to_owned(),
         Duration::from_mins(15),
     );
@@ -4310,6 +4318,7 @@ async fn test_setup_totp_set_token_error_propagates() -> TestResult {
         user_repo,
         totp_service,
         token_store,
+        Arc::new(MockSecretCipher),
         "Korgan".to_owned(),
         Duration::from_mins(15),
     );
@@ -4615,6 +4624,7 @@ async fn test_totp_setup_and_enable_refuse_to_replace_existing_mfa() -> TestResu
         user_repo.clone(),
         totp_service.clone(),
         token_store.clone(),
+        Arc::new(MockSecretCipher),
         "Korgan".to_owned(),
         Duration::from_secs(900),
     );

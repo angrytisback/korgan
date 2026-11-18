@@ -27,7 +27,6 @@ use korgan::application::dto::{EnableTotpCommand, RegisterCommand};
 use korgan::application::error::AppError;
 use korgan::application::use_cases::RegisterUserUseCase;
 use korgan::application::use_cases::mfa::enable::EnableTotpUseCase;
-use korgan::application::use_cases::token_utils::encode_base32;
 use korgan::application::workers::EventBus;
 use korgan::domain::entities::{AuditEventStatus, AuditLog, User, UserMfa};
 use korgan::domain::value_objects::*;
@@ -1018,7 +1017,11 @@ async fn test_vuln09_mfa_enablement_atomicity_with_injected_failures() -> TestRe
 
     // Seed pending TOTP secret in token store
     let raw_secret = b"12345678901234567890";
-    let base32_secret = encode_base32(raw_secret);
+    let base32_secret = korgan::application::use_cases::token_utils::seal_pending_totp_secret(
+        secret_cipher.as_ref(),
+        &user_id,
+        raw_secret,
+    )?;
     token_store
         .set_token(
             &format!("pending_totp:{user_id}"),
