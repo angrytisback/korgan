@@ -2149,6 +2149,8 @@ async fn test_endpoint_specific_budgets_are_enforced() -> TestResult {
         "/api/v1/auth/register",
         "/api/v1/password/forgot",
         "/api/v1/auth/mfa/verify",
+        "/api/v1/password/reset",
+        "/api/v1/password/change",
     ] {
         let _ = send_request(&app, post_json(uri)?).await?;
     }
@@ -2163,6 +2165,9 @@ async fn test_endpoint_specific_budgets_are_enforced() -> TestResult {
     assert_eq!(budget("ep_rl:register:"), Some(5), "{calls:?}");
     assert_eq!(budget("ep_rl:forgot_password:"), Some(5), "{calls:?}");
     assert_eq!(budget("ep_rl:mfa_verify:"), Some(10), "{calls:?}");
+    assert_eq!(budget("ep_rl:password_reset:"), Some(10), "{calls:?}");
+    // The change route is rate-limited before authentication (credential-guessing guard).
+    assert_eq!(budget("ep_rl:password_change:"), Some(10), "{calls:?}");
     Ok(())
 }
 
