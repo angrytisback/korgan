@@ -233,8 +233,15 @@ impl OAuthCallbackUseCase {
         existing_user.verify_email(now);
         // 4. Validate login eligibility
         existing_user.can_login(now)?;
-        // 5. Persist changes to database (password_hash = NULL in SQL)
-        self.user_repo.update(&existing_user).await?;
+        // 5. Persist ONLY these fields, and only while the account is still
+        // `Unverified` (compare-and-set): a concurrent ban must not be undone.
+        if !self
+            .user_repo
+            .activate_unverified_for_oauth(&existing_user.id, now)
+            .await?
+        {
+            return Err(AppError::Forbidden);
+        }
         // 6. Invalidate all existing sessions across all devices
         let revoked_ids = self
             .session_repo

@@ -57,7 +57,10 @@ impl ReqwestHibpClient {
         hasher.update(password.as_bytes());
         let digest = hasher.finalize();
         let hex = format!("{digest:X}");
-        (hex[..5].to_string(), hex[5..].to_string())
+        hex.split_at_checked(5).map_or_else(
+            || (hex.clone(), String::new()),
+            |(prefix, suffix)| (prefix.to_owned(), suffix.to_owned()),
+        )
     }
 }
 

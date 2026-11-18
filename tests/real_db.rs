@@ -442,6 +442,60 @@ async fn set_status_if_is_a_granular_compare_and_set() -> TestResult {
     db.drop_db().await
 }
 
+#[tokio::test]
+#[ignore = "needs KORGAN_TEST_DATABASE_URL"]
+async fn email_verification_and_oauth_activation_are_granular_and_status_guarded() -> TestResult {
+    use korgan::domain::entities::AccountStatus;
+
+    let db = TestDb::create().await?;
+    korgan::bootstrap::run_migrations(&db.pool).await?;
+    let users = PostgresUserRepository::new(db.pool.clone());
+    let now = chrono::Utc::now();
+
+    // 1. Unverified -> verified+active; unrelated columns untouched.
+    let mut u1 = new_user(11)?;
+    u1.status = AccountStatus::Unverified;
+    u1.password_hash = Some(PasswordHash::new(DUMMY_HASH)?);
+    users.create(&u1).await?;
+    assert!(users.mark_email_verified(&u1.id, now).await?);
+    let after = users.find_by_id(&u1.id).await?.ok_or("missing")?;
+    assert_eq!(after.status, AccountStatus::Active);
+    assert!(after.email_verified_at.is_some());
+    assert!(after.password_hash.is_some());
+
+    // 2. A suspended account is never revived by a verification link.
+    let mut u2 = new_user(12)?;
+    u2.status = AccountStatus::Suspended;
+    users.create(&u2).await?;
+    assert!(!users.mark_email_verified(&u2.id, now).await?);
+    assert_eq!(
+        users.find_by_id(&u2.id).await?.ok_or("missing")?.status,
+        AccountStatus::Suspended
+    );
+
+    // 3. OAuth activation clears the attacker-planted password, only while Unverified.
+    let mut u3 = new_user(13)?;
+    u3.status = AccountStatus::Unverified;
+    u3.password_hash = Some(PasswordHash::new(DUMMY_HASH)?);
+    users.create(&u3).await?;
+    assert!(users.activate_unverified_for_oauth(&u3.id, now).await?);
+    let after = users.find_by_id(&u3.id).await?.ok_or("missing")?;
+    assert_eq!(after.status, AccountStatus::Active);
+    assert!(after.password_hash.is_none());
+
+    // 4. Banned in the meantime: the takeover defence must not undo the ban.
+    let mut u4 = new_user(14)?;
+    u4.status = AccountStatus::Suspended;
+    u4.password_hash = Some(PasswordHash::new(DUMMY_HASH)?);
+    users.create(&u4).await?;
+    assert!(!users.activate_unverified_for_oauth(&u4.id, now).await?);
+    let after = users.find_by_id(&u4.id).await?.ok_or("missing")?;
+    assert_eq!(after.status, AccountStatus::Suspended);
+    assert!(after.password_hash.is_some());
+
+    db.drop_db().await
+}
+
 /// Builds a bus whose audit entries commit together with the work it wraps.
 async fn atomic_bus(
     db: &TestDb,

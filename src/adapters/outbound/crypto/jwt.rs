@@ -188,7 +188,10 @@ impl Ed25519JwtService {
         let mut hasher = Sha256::new();
         hasher.update(verifying_key.to_bytes());
         let digest = hasher.finalize();
-        BASE64_URL_SAFE_NO_PAD.encode(&digest[..16])
+        digest
+            .first_chunk::<16>()
+            .map(|head| BASE64_URL_SAFE_NO_PAD.encode(head))
+            .unwrap_or_default()
     }
 
     /// Returns the active Key Identifier.
