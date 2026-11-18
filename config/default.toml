@@ -136,6 +136,8 @@ login_max_requests = 10
 register_max_requests = 5
 forgot_password_max_requests = 5
 mfa_max_requests = 10
+password_change_max_requests = 10
+password_reset_max_requests = 10
 # Only enable behind a trusted reverse proxy that sets X-Forwarded-For.
 trust_proxy_headers = false
 

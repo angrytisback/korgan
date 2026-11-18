@@ -65,35 +65,63 @@ impl ForgotPasswordUseCase {
 
         let maybe_email = EmailAddress::parse(&cmd.email).ok();
 
-        if let Some(ref email) = maybe_email
-            && let Ok(Some(user)) = self.user_repo.find_by_email(email).await
-            && user.status == crate::domain::entities::AccountStatus::Active
-        {
-            let (raw_token, token_hash) = generate_opaque_token();
-            let key = format!("reset_password:{token_hash}");
+        let eligible_user = match maybe_email {
+            Some(ref email) => match self.user_repo.find_by_email(email).await {
+                Ok(Some(user)) if user.status == crate::domain::entities::AccountStatus::Active => {
+                    Some(user)
+                }
+                _ => None,
+            },
+            None => None,
+        };
 
-            let _ = self
-                .token_store
-                .set_token(&key, &user.id.to_string(), self.reset_token_ttl)
-                .await;
+        // Constant-work path: whether or not the account exists, perform the
+        // same token generation, cache write and audit enqueue so response
+        // latency cannot be used to enumerate accounts. Only the real path
+        // stores a resolvable key and dispatches the e-mail.
+        let (raw_token, token_hash) = generate_opaque_token();
+        let (key, value) = match &eligible_user {
+            Some(user) => (format!("reset_password:{token_hash}"), user.id.to_string()),
+            None => (
+                format!("reset_password_decoy:{token_hash}"),
+                String::from("decoy"),
+            ),
+        };
+        let _ = self
+            .token_store
+            .set_token(&key, &value, self.reset_token_ttl)
+            .await;
 
+        if let Some(user) = &eligible_user {
             self.event_bus.dispatch(AppEvent::SendPasswordResetEmail {
                 to: user.email.clone(),
                 token: raw_token,
             });
-
-            self.event_bus
-                .record_audit(AuditLog::new(
-                    Some(user.id),
-                    cmd.ip_address,
-                    cmd.user_agent,
-                    cmd.request_id,
-                    audit_events::PASSWORD_RESET_REQUESTED,
-                    AuditEventStatus::Success,
-                    serde_json::json!({ "email": user.email.as_str() }),
-                ))
-                .await;
         }
+
+        let (subject, status, metadata) = match &eligible_user {
+            Some(user) => (
+                Some(user.id),
+                AuditEventStatus::Success,
+                serde_json::json!({ "email": user.email.as_str() }),
+            ),
+            None => (
+                None,
+                AuditEventStatus::Blocked,
+                serde_json::json!({ "reason": "no_eligible_account" }),
+            ),
+        };
+        self.event_bus
+            .record_audit(AuditLog::new(
+                subject,
+                cmd.ip_address,
+                cmd.user_agent,
+                cmd.request_id,
+                audit_events::PASSWORD_RESET_REQUESTED,
+                status,
+                metadata,
+            ))
+            .await;
 
         Ok(())
     }

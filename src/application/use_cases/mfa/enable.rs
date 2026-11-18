@@ -62,6 +62,16 @@ impl EnableTotpUseCase {
     pub async fn execute(&self, cmd: EnableTotpCommand) -> Result<TotpEnabledResult, AppError> {
         cmd.validate()?;
 
+        // Never overwrite an already verified factor (see `SetupTotpUseCase`).
+        if self
+            .user_repo
+            .find_mfa(&cmd.user_id)
+            .await?
+            .is_some_and(|mfa| mfa.is_verified())
+        {
+            return Err(AppError::Conflict);
+        }
+
         let pending_key = format!("pending_totp:{}", cmd.user_id);
         let maybe_secret_str = self.token_store.get_token(&pending_key).await?;
 

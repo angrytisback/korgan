@@ -2758,7 +2758,9 @@ async fn tier4_full_user_lifecycle_multi_device_mfa_and_passkey() -> TestResult 
     .await?;
     assert_eq!(pk_finish.status(), StatusCode::CREATED);
 
-    // Step 6: Setup & Enable TOTP MFA
+    // Step 6: Adding a second factor now needs step-up. The account owns a
+    // passkey, so a password-only session (amr = ["pwd"]) is refused for both
+    // setup and enable (KRG-SEC-15: no factor changes from a weak session).
     let setup_res = send_request(
         &ctx.app,
         Method::POST,
@@ -2767,23 +2769,16 @@ async fn tier4_full_user_lifecycle_multi_device_mfa_and_passkey() -> TestResult 
         None,
     )
     .await?;
-    let setup_val: Value = json_body(setup_res).await?;
-    let secret = setup_val["secret"].as_str().ok_or("missing secret")?;
-
-    let raw_secret = decode_base32(secret).ok_or("failed to decode base32 secret")?;
-    #[allow(deprecated)]
-    let totp = Totp::new(Algorithm::SHA1, 6, 1, 30, raw_secret, None, String::new())
-        .map_err(|e| format!("failed to construct TOTP: {e}"))?;
-    let code = totp.generate_current().to_string();
+    assert_eq!(setup_res.status(), StatusCode::FORBIDDEN);
     let enable_res = send_request(
         &ctx.app,
         Method::POST,
         "/api/v1/mfa/enable",
         Some(auth_mobile.clone()),
-        Some(json!({ "code": code })),
+        Some(json!({ "code": "123456" })),
     )
     .await?;
-    assert_eq!(enable_res.status(), StatusCode::OK);
+    assert_eq!(enable_res.status(), StatusCode::FORBIDDEN);
 
     // Step 7: Login on Laptop using Passkey (Web mode with Set-Cookie)
     let login_start = send_request(

@@ -134,8 +134,20 @@ pub fn build_router(state: AppState) -> Result<Router, RouterError> {
                 endpoint_rate_limit_middleware,
             )),
         )
-        .route("/password/reset", post(password::reset))
-        .route("/password/change", post(password::change))
+        .route(
+            "/password/reset",
+            post(password::reset).route_layer(from_fn_with_state(
+                (state.clone(), EndpointLimit::PasswordReset),
+                endpoint_rate_limit_middleware,
+            )),
+        )
+        .route(
+            "/password/change",
+            post(password::change).route_layer(from_fn_with_state(
+                (state.clone(), EndpointLimit::PasswordChange),
+                endpoint_rate_limit_middleware,
+            )),
+        )
         // Multi-Factor Authentication
         .route("/mfa/setup", post(mfa::setup))
         .route("/mfa/enable", post(mfa::enable))
