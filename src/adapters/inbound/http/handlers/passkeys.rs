@@ -303,14 +303,14 @@ pub async fn list(
     responses(
         (status = 204, description = "Passkey deleted successfully"),
         (status = 401, description = "Authentication required", body = ProblemDetails),
-        (status = 403, description = "Forbidden (passkey belongs to another user)", body = ProblemDetails),
+        (status = 403, description = "Forbidden (passkey belongs to another user, or step-up authentication required)", body = ProblemDetails),
         (status = 404, description = "Passkey not found", body = ProblemDetails),
         (status = 500, description = "Unexpected server error", body = ProblemDetails)
     )
 )]
 pub async fn delete(
     State(state): State<AppState>,
-    auth_user: AuthUser,
+    auth_user: StepUpUser,
     metadata: ClientMetadata,
     Path(id): Path<PasskeyId>,
 ) -> Result<StatusCode, ApiError> {
