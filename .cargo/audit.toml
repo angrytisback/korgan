@@ -4,4 +4,7 @@ ignore = [
     # Korgan is pure PostgreSQL & Redis; SQLite engine/WAL files are never opened or exposed.
     "RUSTSEC-2026-0459",
     "CVE-2026-119375",
+    # RUSTSEC-2026-0543: chrono is flagged as unmaintained (informational, no known vulnerability).
+    # Accepted risk, owner: nobody. Revisit when a maintained replacement (e.g. `time`) is adopted.
+    "RUSTSEC-2026-0543",
 ]
