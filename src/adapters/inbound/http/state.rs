@@ -1,5 +1,6 @@
 //! Shared application state injected into every handler and route.
 
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,7 +39,7 @@ use crate::ports::services::{
     TotpService, WebAuthnService,
 };
 
-/// State shared by all handlers and middlewares.
+/// Inner state shared across all HTTP handlers, extractors, and middleware.
 ///
 /// It carries only what the HTTP layer needs: the use cases, and the few
 /// infrastructure handles that extractors, middleware and probes use directly
@@ -47,8 +48,7 @@ use crate::ports::services::{
 /// HIBP, OAuth and WebAuthn providers, the event bus) are *not* stored here.
 /// Fields are crate-private except the handful the binary (GC worker, CLI)
 /// and the integration tests access directly.
-#[derive(Clone)]
-pub struct AppState {
+pub struct AppStateInner {
     /// Validated, immutable configuration.
     pub(crate) settings: Arc<Settings>,
 
@@ -101,11 +101,383 @@ pub struct AppState {
     pub(crate) redis_pool: deadpool_redis::Pool,
 }
 
+impl std::fmt::Debug for AppStateInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppStateInner")
+            .field("settings", &self.settings)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Cheaply cloneable handle to shared [`AppStateInner`] state.
+///
+/// Wrapping the 43 state fields behind a single [`Arc`] reduces per-request
+/// `State<AppState>` extraction from ~100 atomic reference-count updates to 1.
+pub struct AppState {
+    inner: Arc<AppStateInner>,
+}
+
+impl Clone for AppState {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
 impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppState")
-            .field("settings", &self.settings)
+            .field("settings", &self.inner.settings)
             .finish_non_exhaustive()
+    }
+}
+
+impl Deref for AppState {
+    type Target = AppStateInner;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+struct SharedPortRefs<'a> {
+    settings: &'a Settings,
+    user_repo: &'a Arc<dyn UserRepository>,
+    session_repo: &'a Arc<dyn SessionRepository>,
+    audit_repo: &'a Arc<dyn AuditLogRepository>,
+    passkey_repo: &'a Arc<dyn PasskeyRepository>,
+    token_store: &'a Arc<dyn TokenStore>,
+    rate_limiter: &'a Arc<dyn RateLimiterPort>,
+    password_hasher: &'a Arc<dyn PasswordHasher>,
+    token_signer: &'a Arc<dyn TokenSigner>,
+}
+
+struct AuthUseCases {
+    register: RegisterUserUseCase,
+    login: LoginUseCase,
+    refresh_session: RefreshSessionUseCase,
+    verify_email: VerifyEmailUseCase,
+}
+
+struct OAuthAndPasskeyUseCases {
+    generate_oauth_url: GenerateOAuthUrlUseCase,
+    oauth_callback: OAuthCallbackUseCase,
+    start_passkey_registration: StartPasskeyRegistrationUseCase,
+    finish_passkey_registration: FinishPasskeyRegistrationUseCase,
+    start_passkey_login: StartPasskeyLoginUseCase,
+    finish_passkey_login: FinishPasskeyLoginUseCase,
+    list_passkeys: ListPasskeysUseCase,
+    delete_passkey: DeletePasskeyUseCase,
+}
+
+struct PasswordAndMfaUseCases {
+    forgot_password: ForgotPasswordUseCase,
+    reset_password: ResetPasswordUseCase,
+    change_password: ChangePasswordUseCase,
+    setup_totp: SetupTotpUseCase,
+    enable_totp: EnableTotpUseCase,
+    disable_totp: DisableTotpUseCase,
+    verify_mfa_login: VerifyMfaLoginUseCase,
+}
+
+struct SessionUserAdminUseCases {
+    list_sessions: ListSessionsUseCase,
+    revoke_session: RevokeSessionUseCase,
+    revoke_all_sessions: RevokeAllSessionsUseCase,
+    get_profile: GetProfileUseCase,
+    update_profile: UpdateProfileUseCase,
+    list_users: ListUsersUseCase,
+    ban_user: BanUserUseCase,
+    unban_user: UnbanUserUseCase,
+    issue_ws_ticket: IssueWsTicketUseCase,
+    verify_ws_ticket: VerifyWsTicketUseCase,
+    bootstrap: BootstrapSuperadminUseCase,
+    verify_audit_chain: VerifyAuditChainUseCase,
+    unlock_user: UnlockUserUseCase,
+}
+
+fn build_auth_use_cases(
+    ports: &SharedPortRefs<'_>,
+    hibp_client: &Arc<dyn HibpClient>,
+    event_bus: &EventBus,
+) -> AuthUseCases {
+    let auth = &ports.settings.auth;
+    let register = RegisterUserUseCase::new(
+        ports.user_repo.clone(),
+        ports.password_hasher.clone(),
+        ports.token_store.clone(),
+        hibp_client.clone(),
+        event_bus.clone(),
+        Duration::from_secs(auth.email_verification_ttl_secs),
+    );
+
+    let login_config = LoginConfig {
+        max_failed_attempts: auth.max_failed_login_attempts,
+        lockout_duration: Duration::from_secs(auth.lockout_duration_secs),
+        rate_limit_window: Duration::from_secs(ports.settings.rate_limit.window_secs),
+        max_attempts_per_ip: ports.settings.rate_limit.login_max_requests,
+        access_token_ttl: Duration::from_secs(auth.access_token_ttl_secs),
+        refresh_token_ttl: Duration::from_secs(auth.refresh_token_ttl_secs),
+        mfa_ticket_ttl: Duration::from_secs(auth.mfa_challenge_ttl_secs),
+        jwt_issuer: auth.issuer.clone().into(),
+        jwt_audience: auth.audience.clone().into(),
+    };
+
+    let login = LoginUseCase::new(
+        ports.user_repo.clone(),
+        ports.session_repo.clone(),
+        ports.password_hasher.clone(),
+        ports.token_signer.clone(),
+        ports.token_store.clone(),
+        ports.rate_limiter.clone(),
+        event_bus.clone(),
+        login_config,
+    );
+
+    let refresh_session = RefreshSessionUseCase::new(
+        ports.session_repo.clone(),
+        ports.user_repo.clone(),
+        ports.token_signer.clone(),
+        ports.token_store.clone(),
+        event_bus.clone(),
+        Duration::from_secs(auth.access_token_ttl_secs),
+        Duration::from_secs(auth.refresh_token_ttl_secs),
+        auth.issuer.clone(),
+        auth.audience.clone(),
+    );
+
+    let verify_email = VerifyEmailUseCase::new(
+        ports.user_repo.clone(),
+        ports.token_store.clone(),
+        event_bus.clone(),
+    );
+
+    AuthUseCases {
+        register,
+        login,
+        refresh_session,
+        verify_email,
+    }
+}
+
+fn build_oauth_and_passkey_use_cases(
+    ports: &SharedPortRefs<'_>,
+    oauth_account_repo: Arc<dyn OAuthAccountRepository>,
+    google_oauth: Arc<dyn OAuthProviderPort>,
+    github_oauth: Arc<dyn OAuthProviderPort>,
+    webauthn_service: Arc<dyn WebAuthnService>,
+    event_bus: &EventBus,
+) -> OAuthAndPasskeyUseCases {
+    let auth = &ports.settings.auth;
+    let generate_oauth_url = GenerateOAuthUrlUseCase::new(
+        google_oauth.clone(),
+        github_oauth.clone(),
+        ports.token_store.clone(),
+        Duration::from_secs(600),
+    );
+
+    let oauth_callback = OAuthCallbackUseCase::new(
+        ports.user_repo.clone(),
+        oauth_account_repo,
+        ports.session_repo.clone(),
+        ports.token_signer.clone(),
+        ports.token_store.clone(),
+        google_oauth,
+        github_oauth,
+        event_bus.clone(),
+        Duration::from_secs(auth.access_token_ttl_secs),
+        Duration::from_secs(auth.refresh_token_ttl_secs),
+        auth.issuer.clone(),
+        auth.audience.clone(),
+    );
+
+    let start_passkey_registration = StartPasskeyRegistrationUseCase::new(
+        ports.user_repo.clone(),
+        ports.passkey_repo.clone(),
+        webauthn_service.clone(),
+        ports.token_store.clone(),
+        Duration::from_secs(120),
+    );
+
+    let finish_passkey_registration = FinishPasskeyRegistrationUseCase::new(
+        ports.passkey_repo.clone(),
+        webauthn_service.clone(),
+        ports.token_store.clone(),
+        event_bus.clone(),
+    );
+
+    let start_passkey_login = StartPasskeyLoginUseCase::new(
+        webauthn_service.clone(),
+        ports.token_store.clone(),
+        Duration::from_secs(120),
+    );
+
+    let finish_passkey_login = FinishPasskeyLoginUseCase::new(
+        ports.user_repo.clone(),
+        ports.passkey_repo.clone(),
+        ports.session_repo.clone(),
+        webauthn_service,
+        ports.token_store.clone(),
+        ports.token_signer.clone(),
+        event_bus.clone(),
+        Duration::from_secs(auth.access_token_ttl_secs),
+        Duration::from_secs(auth.refresh_token_ttl_secs),
+        auth.issuer.clone(),
+        auth.audience.clone(),
+    );
+
+    let list_passkeys = ListPasskeysUseCase::new(ports.passkey_repo.clone());
+    let delete_passkey = DeletePasskeyUseCase::new(ports.passkey_repo.clone(), event_bus.clone());
+
+    OAuthAndPasskeyUseCases {
+        generate_oauth_url,
+        oauth_callback,
+        start_passkey_registration,
+        finish_passkey_registration,
+        start_passkey_login,
+        finish_passkey_login,
+        list_passkeys,
+        delete_passkey,
+    }
+}
+
+fn build_password_and_mfa_use_cases(
+    ports: &SharedPortRefs<'_>,
+    hibp_client: Arc<dyn HibpClient>,
+    totp_service: Arc<dyn TotpService>,
+    secret_cipher: Arc<dyn SecretCipher>,
+    event_bus: &EventBus,
+) -> PasswordAndMfaUseCases {
+    let auth = &ports.settings.auth;
+    let forgot_password = ForgotPasswordUseCase::new(
+        ports.user_repo.clone(),
+        ports.token_store.clone(),
+        event_bus.clone(),
+        Duration::from_secs(auth.password_reset_ttl_secs),
+    );
+
+    let reset_password = ResetPasswordUseCase::new(
+        ports.user_repo.clone(),
+        ports.session_repo.clone(),
+        ports.password_hasher.clone(),
+        ports.token_store.clone(),
+        hibp_client.clone(),
+        event_bus.clone(),
+        auth.password_history_depth,
+    );
+
+    let change_password = ChangePasswordUseCase::new(
+        ports.user_repo.clone(),
+        ports.session_repo.clone(),
+        ports.password_hasher.clone(),
+        ports.token_store.clone(),
+        hibp_client,
+        event_bus.clone(),
+        auth.password_history_depth,
+    );
+
+    let setup_totp = SetupTotpUseCase::new(
+        ports.user_repo.clone(),
+        totp_service.clone(),
+        ports.token_store.clone(),
+        "Korgan".to_owned(),
+        Duration::from_secs(auth.mfa_challenge_ttl_secs),
+    );
+
+    let enable_totp = EnableTotpUseCase::new(
+        ports.user_repo.clone(),
+        totp_service.clone(),
+        secret_cipher.clone(),
+        ports.token_store.clone(),
+        event_bus.clone(),
+    );
+
+    let disable_totp = DisableTotpUseCase::new(
+        ports.user_repo.clone(),
+        ports.password_hasher.clone(),
+        event_bus.clone(),
+    );
+
+    let verify_mfa_login = VerifyMfaLoginUseCase::new(
+        ports.user_repo.clone(),
+        ports.session_repo.clone(),
+        totp_service,
+        secret_cipher,
+        ports.token_signer.clone(),
+        ports.token_store.clone(),
+        event_bus.clone(),
+        Duration::from_secs(auth.access_token_ttl_secs),
+        Duration::from_secs(auth.refresh_token_ttl_secs),
+        auth.issuer.clone(),
+        auth.audience.clone(),
+        auth.max_failed_login_attempts,
+        Duration::from_secs(auth.lockout_duration_secs),
+    );
+
+    PasswordAndMfaUseCases {
+        forgot_password,
+        reset_password,
+        change_password,
+        setup_totp,
+        enable_totp,
+        disable_totp,
+        verify_mfa_login,
+    }
+}
+
+fn build_session_user_admin_use_cases(
+    ports: &SharedPortRefs<'_>,
+    event_bus: EventBus,
+) -> SessionUserAdminUseCases {
+    let list_sessions = ListSessionsUseCase::new(ports.session_repo.clone());
+    let revoke_session = RevokeSessionUseCase::new(
+        ports.session_repo.clone(),
+        ports.token_store.clone(),
+        event_bus.clone(),
+    );
+    let revoke_all_sessions = RevokeAllSessionsUseCase::new(
+        ports.session_repo.clone(),
+        ports.token_store.clone(),
+        event_bus.clone(),
+    );
+
+    let get_profile = GetProfileUseCase::new(ports.user_repo.clone());
+    let update_profile = UpdateProfileUseCase::new(ports.user_repo.clone());
+    let list_users = ListUsersUseCase::new(ports.user_repo.clone());
+    let ban_user = BanUserUseCase::new(
+        ports.user_repo.clone(),
+        ports.session_repo.clone(),
+        ports.token_store.clone(),
+        event_bus.clone(),
+    );
+    let unban_user = UnbanUserUseCase::new(ports.user_repo.clone(), event_bus.clone());
+    let issue_ws_ticket = IssueWsTicketUseCase::new(ports.token_store.clone());
+    let verify_ws_ticket = VerifyWsTicketUseCase::new(ports.token_store.clone());
+    let bootstrap = BootstrapSuperadminUseCase::new(
+        ports.user_repo.clone(),
+        ports.password_hasher.clone(),
+        event_bus.clone(),
+    );
+    let verify_audit_chain = VerifyAuditChainUseCase::new(ports.audit_repo.clone());
+    let unlock_user = UnlockUserUseCase::new(ports.user_repo.clone(), event_bus);
+
+    SessionUserAdminUseCases {
+        list_sessions,
+        revoke_session,
+        revoke_all_sessions,
+        get_profile,
+        update_profile,
+        list_users,
+        ban_user,
+        unban_user,
+        issue_ws_ticket,
+        verify_ws_ticket,
+        bootstrap,
+        verify_audit_chain,
+        unlock_user,
     }
 }
 
@@ -136,262 +508,94 @@ impl AppState {
         pg_pool: sqlx::PgPool,
         redis_pool: deadpool_redis::Pool,
     ) -> Self {
-        let register_use_case = RegisterUserUseCase::new(
-            user_repo.clone(),
-            password_hasher.clone(),
-            token_store.clone(),
-            hibp_client.clone(),
-            event_bus.clone(),
-            Duration::from_secs(settings.auth.email_verification_ttl_secs),
-        );
-
-        let login_config = LoginConfig {
-            max_failed_attempts: settings.auth.max_failed_login_attempts,
-            lockout_duration: Duration::from_secs(settings.auth.lockout_duration_secs),
-            rate_limit_window: Duration::from_secs(settings.rate_limit.window_secs),
-            max_attempts_per_ip: settings.rate_limit.login_max_requests,
-            access_token_ttl: Duration::from_secs(settings.auth.access_token_ttl_secs),
-            refresh_token_ttl: Duration::from_secs(settings.auth.refresh_token_ttl_secs),
-            mfa_ticket_ttl: Duration::from_secs(settings.auth.mfa_challenge_ttl_secs),
-            jwt_issuer: settings.auth.issuer.clone(),
-            jwt_audience: settings.auth.audience.clone(),
+        let ports = SharedPortRefs {
+            settings: &settings,
+            user_repo: &user_repo,
+            session_repo: &session_repo,
+            audit_repo: &audit_repo,
+            passkey_repo: &passkey_repo,
+            token_store: &token_store,
+            rate_limiter: &rate_limiter,
+            password_hasher: &password_hasher,
+            token_signer: &token_signer,
         };
 
-        let login_use_case = LoginUseCase::new(
-            user_repo.clone(),
-            session_repo.clone(),
-            password_hasher.clone(),
-            token_signer.clone(),
-            token_store.clone(),
-            rate_limiter.clone(),
-            event_bus.clone(),
-            login_config,
+        let auth = build_auth_use_cases(&ports, &hibp_client, &event_bus);
+        let oauth_passkey = build_oauth_and_passkey_use_cases(
+            &ports,
+            oauth_account_repo,
+            google_oauth,
+            github_oauth,
+            webauthn_service,
+            &event_bus,
         );
-
-        let refresh_session_use_case = RefreshSessionUseCase::new(
-            session_repo.clone(),
-            user_repo.clone(),
-            token_signer.clone(),
-            token_store.clone(),
-            event_bus.clone(),
-            Duration::from_secs(settings.auth.access_token_ttl_secs),
-            Duration::from_secs(settings.auth.refresh_token_ttl_secs),
-            settings.auth.issuer.clone(),
-            settings.auth.audience.clone(),
+        let password_mfa = build_password_and_mfa_use_cases(
+            &ports,
+            hibp_client,
+            totp_service,
+            secret_cipher,
+            &event_bus,
         );
-
-        let verify_email_use_case =
-            VerifyEmailUseCase::new(user_repo.clone(), token_store.clone(), event_bus.clone());
-
-        let generate_oauth_url_use_case = GenerateOAuthUrlUseCase::new(
-            google_oauth.clone(),
-            github_oauth.clone(),
-            token_store.clone(),
-            Duration::from_secs(600),
-        );
-
-        let oauth_callback_use_case = OAuthCallbackUseCase::new(
-            user_repo.clone(),
-            oauth_account_repo.clone(),
-            session_repo.clone(),
-            token_signer.clone(),
-            token_store.clone(),
-            google_oauth.clone(),
-            github_oauth.clone(),
-            event_bus.clone(),
-            Duration::from_secs(settings.auth.access_token_ttl_secs),
-            Duration::from_secs(settings.auth.refresh_token_ttl_secs),
-            settings.auth.issuer.clone(),
-            settings.auth.audience.clone(),
-        );
-
-        let start_passkey_registration_use_case = StartPasskeyRegistrationUseCase::new(
-            user_repo.clone(),
-            passkey_repo.clone(),
-            webauthn_service.clone(),
-            token_store.clone(),
-            Duration::from_secs(120),
-        );
-
-        let finish_passkey_registration_use_case = FinishPasskeyRegistrationUseCase::new(
-            passkey_repo.clone(),
-            webauthn_service.clone(),
-            token_store.clone(),
-            event_bus.clone(),
-        );
-
-        let start_passkey_login_use_case = StartPasskeyLoginUseCase::new(
-            webauthn_service.clone(),
-            token_store.clone(),
-            Duration::from_secs(120),
-        );
-
-        let finish_passkey_login_use_case = FinishPasskeyLoginUseCase::new(
-            user_repo.clone(),
-            passkey_repo.clone(),
-            session_repo.clone(),
-            webauthn_service.clone(),
-            token_store.clone(),
-            token_signer.clone(),
-            event_bus.clone(),
-            Duration::from_secs(settings.auth.access_token_ttl_secs),
-            Duration::from_secs(settings.auth.refresh_token_ttl_secs),
-            settings.auth.issuer.clone(),
-            settings.auth.audience.clone(),
-        );
-
-        let list_passkeys_use_case = ListPasskeysUseCase::new(passkey_repo.clone());
-        let delete_passkey_use_case =
-            DeletePasskeyUseCase::new(passkey_repo.clone(), event_bus.clone());
-
-        let forgot_password_use_case = ForgotPasswordUseCase::new(
-            user_repo.clone(),
-            token_store.clone(),
-            event_bus.clone(),
-            Duration::from_secs(settings.auth.password_reset_ttl_secs),
-        );
-
-        let reset_password_use_case = ResetPasswordUseCase::new(
-            user_repo.clone(),
-            session_repo.clone(),
-            password_hasher.clone(),
-            token_store.clone(),
-            hibp_client.clone(),
-            event_bus.clone(),
-            settings.auth.password_history_depth,
-        );
-
-        let change_password_use_case = ChangePasswordUseCase::new(
-            user_repo.clone(),
-            session_repo.clone(),
-            password_hasher.clone(),
-            token_store.clone(),
-            hibp_client.clone(),
-            event_bus.clone(),
-            settings.auth.password_history_depth,
-        );
-
-        let setup_totp_use_case = SetupTotpUseCase::new(
-            user_repo.clone(),
-            totp_service.clone(),
-            token_store.clone(),
-            "Korgan".to_owned(),
-            Duration::from_secs(settings.auth.mfa_challenge_ttl_secs),
-        );
-
-        let enable_totp_use_case = EnableTotpUseCase::new(
-            user_repo.clone(),
-            totp_service.clone(),
-            secret_cipher.clone(),
-            token_store.clone(),
-            event_bus.clone(),
-        );
-
-        let disable_totp_use_case = DisableTotpUseCase::new(
-            user_repo.clone(),
-            password_hasher.clone(),
-            event_bus.clone(),
-        );
-
-        let verify_mfa_login_use_case = VerifyMfaLoginUseCase::new(
-            user_repo.clone(),
-            session_repo.clone(),
-            totp_service.clone(),
-            secret_cipher.clone(),
-            token_signer.clone(),
-            token_store.clone(),
-            event_bus.clone(),
-            Duration::from_secs(settings.auth.access_token_ttl_secs),
-            Duration::from_secs(settings.auth.refresh_token_ttl_secs),
-            settings.auth.issuer.clone(),
-            settings.auth.audience.clone(),
-            settings.auth.max_failed_login_attempts,
-            Duration::from_secs(settings.auth.lockout_duration_secs),
-        );
-
-        let list_sessions_use_case = ListSessionsUseCase::new(session_repo.clone());
-        let revoke_session_use_case =
-            RevokeSessionUseCase::new(session_repo.clone(), token_store.clone(), event_bus.clone());
-        let revoke_all_sessions_use_case = RevokeAllSessionsUseCase::new(
-            session_repo.clone(),
-            token_store.clone(),
-            event_bus.clone(),
-        );
-
-        let get_profile_use_case = GetProfileUseCase::new(user_repo.clone());
-        let update_profile_use_case = UpdateProfileUseCase::new(user_repo.clone());
-        let list_users_use_case = ListUsersUseCase::new(user_repo.clone());
-        let ban_user_use_case = BanUserUseCase::new(
-            user_repo.clone(),
-            session_repo.clone(),
-            token_store.clone(),
-            event_bus.clone(),
-        );
-        let unban_user_use_case = UnbanUserUseCase::new(user_repo.clone(), event_bus.clone());
-        let issue_ws_ticket_use_case = IssueWsTicketUseCase::new(token_store.clone());
-        let verify_ws_ticket_use_case = VerifyWsTicketUseCase::new(token_store.clone());
-        let bootstrap_use_case = BootstrapSuperadminUseCase::new(
-            user_repo.clone(),
-            password_hasher.clone(),
-            event_bus.clone(),
-        );
-        let verify_audit_chain_use_case = VerifyAuditChainUseCase::new(audit_repo.clone());
-        let unlock_user_use_case = UnlockUserUseCase::new(user_repo.clone(), event_bus.clone());
+        let session_admin = build_session_user_admin_use_cases(&ports, event_bus);
 
         Self {
-            settings,
-            user_repo,
-            session_repo,
-            audit_repo,
-            passkey_repo,
-            token_store,
-            rate_limiter,
-            password_hasher,
-            token_signer,
-            register_use_case,
-            login_use_case,
-            refresh_session_use_case,
-            verify_email_use_case,
-            generate_oauth_url_use_case,
-            oauth_callback_use_case,
-            start_passkey_registration_use_case,
-            finish_passkey_registration_use_case,
-            start_passkey_login_use_case,
-            finish_passkey_login_use_case,
-            list_passkeys_use_case,
-            delete_passkey_use_case,
-            forgot_password_use_case,
-            reset_password_use_case,
-            change_password_use_case,
-            setup_totp_use_case,
-            enable_totp_use_case,
-            disable_totp_use_case,
-            verify_mfa_login_use_case,
-            list_sessions_use_case,
-            revoke_session_use_case,
-            revoke_all_sessions_use_case,
-            get_profile_use_case,
-            update_profile_use_case,
-            list_users_use_case,
-            ban_user_use_case,
-            unban_user_use_case,
-            issue_ws_ticket_use_case,
-            verify_ws_ticket_use_case,
-            bootstrap_use_case,
-            verify_audit_chain_use_case,
-            unlock_user_use_case,
-            pg_pool,
-            redis_pool,
+            inner: Arc::new(AppStateInner {
+                settings,
+                user_repo,
+                session_repo,
+                audit_repo,
+                passkey_repo,
+                token_store,
+                rate_limiter,
+                password_hasher,
+                token_signer,
+                register_use_case: auth.register,
+                login_use_case: auth.login,
+                refresh_session_use_case: auth.refresh_session,
+                verify_email_use_case: auth.verify_email,
+                generate_oauth_url_use_case: oauth_passkey.generate_oauth_url,
+                oauth_callback_use_case: oauth_passkey.oauth_callback,
+                start_passkey_registration_use_case: oauth_passkey.start_passkey_registration,
+                finish_passkey_registration_use_case: oauth_passkey.finish_passkey_registration,
+                start_passkey_login_use_case: oauth_passkey.start_passkey_login,
+                finish_passkey_login_use_case: oauth_passkey.finish_passkey_login,
+                list_passkeys_use_case: oauth_passkey.list_passkeys,
+                delete_passkey_use_case: oauth_passkey.delete_passkey,
+                forgot_password_use_case: password_mfa.forgot_password,
+                reset_password_use_case: password_mfa.reset_password,
+                change_password_use_case: password_mfa.change_password,
+                setup_totp_use_case: password_mfa.setup_totp,
+                enable_totp_use_case: password_mfa.enable_totp,
+                disable_totp_use_case: password_mfa.disable_totp,
+                verify_mfa_login_use_case: password_mfa.verify_mfa_login,
+                list_sessions_use_case: session_admin.list_sessions,
+                revoke_session_use_case: session_admin.revoke_session,
+                revoke_all_sessions_use_case: session_admin.revoke_all_sessions,
+                get_profile_use_case: session_admin.get_profile,
+                update_profile_use_case: session_admin.update_profile,
+                list_users_use_case: session_admin.list_users,
+                ban_user_use_case: session_admin.ban_user,
+                unban_user_use_case: session_admin.unban_user,
+                issue_ws_ticket_use_case: session_admin.issue_ws_ticket,
+                verify_ws_ticket_use_case: session_admin.verify_ws_ticket,
+                bootstrap_use_case: session_admin.bootstrap,
+                verify_audit_chain_use_case: session_admin.verify_audit_chain,
+                unlock_user_use_case: session_admin.unlock_user,
+                pg_pool,
+                redis_pool,
+            }),
         }
     }
 
     /// Synchronizes Prometheus telemetry gauges with persistent storage counts.
     pub async fn sync_telemetry_gauges(&self) {
         if let Ok(count) = self.audit_repo.count_all().await {
-            metrics::gauge!("korgan_audit_chain_length").set(count as f64);
+            let gauge_val = u32::try_from(count).map_or_else(|_| f64::from(u32::MAX), f64::from);
+            metrics::gauge!("korgan_audit_chain_length").set(gauge_val);
         }
         if let Ok(count) = self.session_repo.count_active().await {
-            metrics::gauge!("korgan_active_sessions_gauge").set(count as f64);
+            let gauge_val = u32::try_from(count).map_or_else(|_| f64::from(u32::MAX), f64::from);
+            metrics::gauge!("korgan_active_sessions_gauge").set(gauge_val);
         }
     }
 
@@ -420,5 +624,18 @@ impl AppState {
             .map_err(|e| format!("redis ping failed: {e}"))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_state_is_pointer_sized_shallow_arc() {
+        assert_eq!(
+            std::mem::size_of::<AppState>(),
+            std::mem::size_of::<Arc<AppStateInner>>()
+        );
     }
 }

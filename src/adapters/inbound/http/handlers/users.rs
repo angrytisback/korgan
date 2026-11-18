@@ -17,7 +17,7 @@ use crate::application::dto::{GetProfileQuery, UpdateProfileCommand, UserProfile
 /// User profile response payload.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct UserProfileResponse {
-    /// User identifier (UUIDv7 string).
+    /// User identifier (`UUIDv7` string).
     #[schema(example = "0192a8f0-7c1b-7000-8000-1a2b3c4d5e6f")]
     pub id: String,
 
@@ -42,6 +42,7 @@ pub struct UserProfileResponse {
 }
 
 impl From<UserProfileResult> for UserProfileResponse {
+    #[inline]
     fn from(p: UserProfileResult) -> Self {
         Self {
             id: p.id.to_string(),
@@ -63,6 +64,11 @@ pub struct UpdateProfileRequest {
 }
 
 /// Retrieves the profile for the authenticated caller.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on authentication, rate-limit exceeded, or internal
+/// storage failure.
 #[utoipa::path(
     get,
     path = "/api/v1/users/me",
@@ -90,6 +96,11 @@ pub async fn me(
 }
 
 /// Updates attributes on the authenticated caller's profile.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on authentication, username conflict (409), validation
+/// failure (422), rate-limit exceeded, or internal error.
 #[utoipa::path(
     patch,
     path = "/api/v1/users/me",

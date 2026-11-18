@@ -1248,13 +1248,13 @@ async fn test_mfa_workflow_and_profile_updates() -> TestResult {
     let claims = korgan::ports::services::AccessTokenClaims {
         sub: user.id,
         sid: session_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 3600,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: session.created_at.timestamp(),
-        amr: vec!["pwd".to_string()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     use korgan::ports::services::TokenSigner;
     let token = ctx.token_signer.sign_access_token(&claims)?;
@@ -2226,13 +2226,13 @@ async fn test_auth_extractor_rejects_mismatched_issuer_claim()
     let claims = korgan::ports::services::AccessTokenClaims {
         sub: user.id,
         sid: session.id,
-        iss: "https://rogue-issuer.evil.com".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("https://rogue-issuer.evil.com"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: session.created_at.timestamp(),
-        amr: vec!["pwd".to_owned()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let token = ctx.token_signer.sign_access_token(&claims)?;
 
@@ -2277,13 +2277,13 @@ async fn test_auth_extractor_rejects_mismatched_audience_claim()
     let claims = korgan::ports::services::AccessTokenClaims {
         sub: user.id,
         sid: session.id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "other-microservice".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("other-microservice"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: session.created_at.timestamp(),
-        amr: vec!["pwd".to_owned()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let token = ctx.token_signer.sign_access_token(&claims)?;
 

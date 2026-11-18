@@ -1,4 +1,4 @@
-//! OpenAPI 3.1 document and embedded Scalar UI.
+//! `OpenAPI` 3.1 document and embedded Scalar UI.
 //!
 //! * `GET /openapi.json` & `GET /api-docs/openapi.json` - machine-readable specification
 //! * `GET /docs` - interactive Scalar documentation
@@ -37,7 +37,7 @@ use super::handlers::sessions::{self, ListSessionsParams, SessionResponse};
 use super::handlers::users::{self, UpdateProfileRequest, UserProfileResponse};
 use super::state::AppState;
 
-/// Injects Bearer authentication security definition into the OpenAPI document.
+/// Injects Bearer authentication security definition into the `OpenAPI` document.
 struct SecurityAddon;
 
 impl Modify for SecurityAddon {
@@ -57,7 +57,7 @@ impl Modify for SecurityAddon {
     }
 }
 
-/// Aggregated OpenAPI 3.1 definition.
+/// Aggregated `OpenAPI` 3.1 definition.
 #[derive(Debug, OpenApi)]
 #[openapi(
     info(
@@ -160,7 +160,7 @@ impl Modify for SecurityAddon {
 )]
 pub struct ApiDoc;
 
-/// Routes serving the OpenAPI 3.1 specification and the interactive Scalar UI.
+/// Routes serving the `OpenAPI` 3.1 specification and the interactive Scalar UI.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/openapi.json", get(|| async { Json(ApiDoc::openapi()) }))

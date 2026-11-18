@@ -85,6 +85,10 @@ impl std::fmt::Debug for DisableTotpRequest {
 }
 
 /// Initiates TOTP setup, generating a new secret and QR code.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on authentication, rate-limit, or internal TOTP/storage failures.
 #[utoipa::path(
     post,
     path = "/api/v1/mfa/setup",
@@ -117,6 +121,11 @@ pub async fn setup(
 }
 
 /// Verifies first TOTP code and finalizes enabling MFA.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on invalid/expired setup code, validation, rate-limit,
+/// or internal failures.
 #[utoipa::path(
     post,
     path = "/api/v1/mfa/enable",
@@ -154,6 +163,11 @@ pub async fn enable(
 }
 
 /// Disables MFA on the authenticated caller's account after confirming password.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on invalid credentials, missing step-up authentication,
+/// validation, rate-limit, or internal failures.
 #[utoipa::path(
     post,
     path = "/api/v1/mfa/disable",

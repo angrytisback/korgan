@@ -62,6 +62,7 @@ pub struct AdminUserItemResponse {
 }
 
 impl From<AdminUserItem> for AdminUserItemResponse {
+    #[inline]
     fn from(item: AdminUserItem) -> Self {
         Self {
             id: item.id.to_string(),
@@ -97,6 +98,7 @@ pub struct PaginatedUsersResponse {
 }
 
 impl From<PaginatedUsersResult> for PaginatedUsersResponse {
+    #[inline]
     fn from(res: PaginatedUsersResult) -> Self {
         Self {
             items: res.items.into_iter().map(Into::into).collect(),
@@ -131,6 +133,7 @@ pub struct BanUserResponse {
 }
 
 impl From<BanUserResult> for BanUserResponse {
+    #[inline]
     fn from(res: BanUserResult) -> Self {
         Self {
             id: res.id.to_string(),
@@ -155,6 +158,7 @@ pub struct UnbanUserResponse {
 }
 
 impl From<UnbanUserResult> for UnbanUserResponse {
+    #[inline]
     fn from(res: UnbanUserResult) -> Self {
         Self {
             id: res.id.to_string(),
@@ -165,6 +169,11 @@ impl From<UnbanUserResult> for UnbanUserResponse {
 }
 
 /// Retrieves a paginated list of all users.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on authentication, authorization (admin required),
+/// pagination validation, rate-limit, or internal storage failures.
 #[utoipa::path(
     get,
     path = "/api/v1/admin/users",
@@ -196,6 +205,11 @@ pub async fn list_users(
 }
 
 /// Administratively bans a user and revokes all of their active sessions.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on authentication, authorization (admin required),
+/// invalid UUID or missing target user, rate-limit, or internal failures.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/users/{id}/ban",
@@ -235,6 +249,11 @@ pub async fn ban_user(
 }
 
 /// Restores a suspended user account to active status.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on authentication, authorization (admin required),
+/// invalid UUID or missing target user, rate-limit, or internal failures.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/users/{id}/unban",

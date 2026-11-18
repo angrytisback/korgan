@@ -23,6 +23,7 @@ pub static RATELIMIT_RESET: HeaderName = HeaderName::from_static("ratelimit-rese
 /// request budget of the probing host.
 const EXEMPT_PATHS: [&str; 4] = ["/health", "/health/live", "/health/ready", "/metrics"];
 
+#[inline]
 fn is_exempt_path(path: &str) -> bool {
     EXEMPT_PATHS.contains(&path)
 }
@@ -83,6 +84,7 @@ pub enum EndpointLimit {
 }
 
 impl EndpointLimit {
+    #[inline]
     const fn bucket(self) -> &'static str {
         match self {
             Self::Register => "register",
@@ -91,6 +93,7 @@ impl EndpointLimit {
         }
     }
 
+    #[inline]
     const fn budget(self, settings: &crate::config::RateLimitSettings) -> u32 {
         match self {
             Self::Register => settings.register_max_requests,

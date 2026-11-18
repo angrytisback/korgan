@@ -3,7 +3,7 @@
 //! For every request this middleware:
 //!
 //! 1. reads `X-Request-Id` and keeps it when it is a valid UUID, otherwise
-//!    generates a fresh UUIDv7;
+//!    generates a fresh `UUIDv7`;
 //! 2. stores the [`RequestId`] in the request extensions and in a task-local so
 //!    that [`IntoResponse`](axum::response::IntoResponse) implementations (which
 //!    cannot see the request) can still produce the RFC 9457 `instance`;
@@ -31,6 +31,7 @@ tokio::task_local! {
 }
 
 /// Returns the identifier of the request currently being handled, if any.
+#[inline]
 #[must_use]
 pub fn current_request_id() -> Option<RequestId> {
     CURRENT_REQUEST_ID.try_with(|id| *id).ok()
@@ -64,7 +65,9 @@ pub async fn request_id_middleware(mut request: Request, next: Next) -> Response
         .instrument(span.clone())
         .await;
 
-    if let Ok(value) = HeaderValue::from_str(&request_id.to_string()) {
+    let mut buf = [0u8; 36];
+    let id_str = request_id.encode_hyphenated(&mut buf);
+    if let Ok(value) = HeaderValue::from_bytes(id_str.as_bytes()) {
         response.headers_mut().insert(X_REQUEST_ID.clone(), value);
     }
 

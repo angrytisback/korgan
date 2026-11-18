@@ -59,6 +59,10 @@ pub async fn live() -> Json<HealthResponse> {
 ///
 /// Returns 200 OK when both PostgreSQL and Redis are reachable.
 /// Returns 503 Service Unavailable if any dependency check fails.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] (`503 Service Unavailable`) if the PostgreSQL or Redis probe fails.
 #[utoipa::path(
     get,
     path = "/health/ready",

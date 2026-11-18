@@ -35,7 +35,7 @@ pub struct ListSessionsParams {
 /// Description of an active user session.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SessionResponse {
-    /// Session identifier (UUIDv7 string).
+    /// Session identifier (`UUIDv7` string).
     #[schema(example = "0192a8f0-7c1b-7000-8000-1a2b3c4d5e6f")]
     pub id: String,
 
@@ -63,6 +63,7 @@ pub struct SessionResponse {
 }
 
 impl From<SessionSummary> for SessionResponse {
+    #[inline]
     fn from(s: SessionSummary) -> Self {
         Self {
             id: s.id.to_string(),
@@ -77,6 +78,11 @@ impl From<SessionSummary> for SessionResponse {
 }
 
 /// Lists all active sessions for the authenticated caller.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on authentication, pagination validation, rate-limit,
+/// or internal repository failure.
 #[utoipa::path(
     get,
     path = "/api/v1/sessions",
@@ -111,6 +117,11 @@ pub async fn list(
 }
 
 /// Revokes a specific session belonging to the authenticated caller.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on authentication, ownership mismatch (403), missing
+/// session (404), invalid UUID, rate-limit exceeded, or internal error.
 #[utoipa::path(
     delete,
     path = "/api/v1/sessions/{id}",
@@ -151,6 +162,11 @@ pub async fn revoke(
 }
 
 /// Revokes all active sessions for the user, exempting the caller's current session.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on authentication, missing step-up authentication,
+/// rate-limit exceeded, or internal error.
 #[utoipa::path(
     delete,
     path = "/api/v1/sessions",

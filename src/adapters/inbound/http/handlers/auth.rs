@@ -52,7 +52,7 @@ impl std::fmt::Debug for RegisterRequest {
 /// Registration response payload.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct RegisterResponse {
-    /// Unique identifier of the registered user (UUIDv7 string).
+    /// Unique identifier of the registered user (`UUIDv7` string).
     #[schema(example = "0192a8f0-7c1b-7000-8000-1a2b3c4d5e6f")]
     pub user_id: String,
 
@@ -98,15 +98,15 @@ impl std::fmt::Debug for LoginRequest {
 /// Token bundle issued upon successful authentication.
 #[derive(Clone, Serialize, ToSchema)]
 pub struct AuthTokensResponse {
-    /// RFC 9068 EdDSA Access Token JWT.
+    /// RFC 9068 `EdDSA` Access Token JWT.
     #[schema(example = "eyJhbGciOiJFZERTQSI...")]
     pub access_token: String,
 
-    /// High-entropy Base64URL opaque refresh token.
+    /// High-entropy `Base64URL` opaque refresh token.
     #[schema(example = "c1a2b3c4d5e6f...")]
     pub refresh_token: String,
 
-    /// OAuth2 token type, always "Bearer".
+    /// `OAuth2` token type, always "Bearer".
     #[schema(example = "Bearer")]
     pub token_type: &'static str,
 
@@ -132,6 +132,7 @@ impl std::fmt::Debug for AuthTokensResponse {
 }
 
 impl From<AuthTokensResult> for AuthTokensResponse {
+    #[inline]
     fn from(res: AuthTokensResult) -> Self {
         Self {
             access_token: res.access_token,
@@ -156,6 +157,7 @@ pub struct MfaChallengeResponse {
 }
 
 impl From<MfaChallengeResult> for MfaChallengeResponse {
+    #[inline]
     fn from(res: MfaChallengeResult) -> Self {
         Self {
             mfa_ticket: res.mfa_ticket,
@@ -217,6 +219,7 @@ pub struct MessageResponse {
 
 impl MessageResponse {
     /// Creates a new message response.
+    #[inline]
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
@@ -226,6 +229,11 @@ impl MessageResponse {
 }
 
 /// Registers a new user account.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on conflict (e-mail/username already registered),
+/// validation failure, rate-limit exceeded, or internal error.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/register",
@@ -268,6 +276,11 @@ pub async fn register(
 }
 
 /// Authenticates a user with primary credentials.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on invalid credentials or locked account, validation
+/// failure, rate-limit exceeded, or internal error.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/login",
@@ -317,6 +330,11 @@ pub async fn login(
 }
 
 /// Completes authentication when Multi-Factor Authentication is challenged.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on invalid code or expired MFA ticket, validation
+/// failure, rate-limit exceeded, or internal error.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/mfa/verify",
@@ -357,6 +375,11 @@ pub async fn verify_mfa(
 }
 
 /// Rotates an existing refresh token and issues a fresh token pair.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on invalid/replayed token, forbidden channel token
+/// submission, validation failure, rate-limit exceeded, or internal error.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/refresh",
@@ -445,6 +468,11 @@ pub async fn refresh(
 }
 
 /// Verifies user's e-mail address via token link.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on invalid or expired verification token, validation
+/// failure, rate-limit exceeded, or internal error.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/verify-email",
@@ -479,6 +507,11 @@ pub async fn verify_email(
 }
 
 /// Logs out the user by revoking the current session and clearing cookies.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on unauthenticated/invalid session, forbidden channel
+/// token submission, validation failure, rate-limit exceeded, or internal error.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/logout",
@@ -579,7 +612,7 @@ pub(crate) fn attach_auth_cookies(
         .secure(true)
         .same_site(SameSite::Strict)
         .max_age(CookieDuration::seconds(
-            state.settings.auth.refresh_token_ttl_secs as i64,
+            i64::try_from(state.settings.auth.refresh_token_ttl_secs).unwrap_or(i64::MAX),
         ))
         .build();
     jar = jar.add(host_refresh_cookie);
@@ -617,7 +650,9 @@ fn build_cookie<'a>(
         .http_only(true)
         .secure(true)
         .same_site(SameSite::Strict)
-        .max_age(CookieDuration::seconds(max_age_secs as i64));
+        .max_age(CookieDuration::seconds(
+            i64::try_from(max_age_secs).unwrap_or(i64::MAX),
+        ));
 
     if let Some(dom) = domain {
         builder = builder.domain(dom.to_owned());
@@ -644,7 +679,7 @@ fn removal_cookie<'a>(name: &'static str, domain: Option<&str>) -> Cookie<'a> {
 /// WebSocket ticket issuance response.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WsTicketResponse {
-    /// 32-byte Base64URL ephemeral ticket.
+    /// 32-byte `Base64URL` ephemeral ticket.
     #[schema(example = "dGhpcy1pcy1hLXNhbXBsZS1iYXNlNjQtdXJsLXNlY3JldA")]
     pub ticket: String,
     /// Lifetime of ticket in seconds.
@@ -653,6 +688,7 @@ pub struct WsTicketResponse {
     pub expires_in: u64,
 }
 
+#[inline]
 const fn default_ws_ticket_ttl() -> u64 {
     15
 }
@@ -668,10 +704,10 @@ pub struct VerifyWsTicketRequest {
 /// WebSocket ticket verification response payload.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct VerifyWsTicketResponse {
-    /// Subject user identifier (UUIDv7 string).
+    /// Subject user identifier (`UUIDv7` string).
     #[schema(example = "0192a8f0-7c1b-7000-8000-1a2b3c4d5e6f")]
     pub sub: String,
-    /// Associated session identifier (UUIDv7 string).
+    /// Associated session identifier (`UUIDv7` string).
     #[schema(example = "0192a8f0-7c1b-7000-8000-9a8b7c6d5e4f")]
     pub sid: String,
     /// Assigned authorization role.
@@ -680,6 +716,7 @@ pub struct VerifyWsTicketResponse {
 }
 
 impl From<crate::ports::cache::WsTicketPayload> for VerifyWsTicketResponse {
+    #[inline]
     fn from(p: crate::ports::cache::WsTicketPayload) -> Self {
         Self {
             sub: p.sub,
@@ -690,6 +727,11 @@ impl From<crate::ports::cache::WsTicketPayload> for VerifyWsTicketResponse {
 }
 
 /// Issues a short-lived (15s) single-use WebSocket/WebRTC ticket for the authenticated session.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] on authentication, inactive/forbidden account, or
+/// internal cache failures.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/ws-ticket",
@@ -721,6 +763,11 @@ pub async fn issue_ws_ticket(
 }
 
 /// Verifies and atomically consumes a single-use WebSocket ticket (internal endpoint for realtime gateways).
+///
+/// # Errors
+///
+/// Returns [`ApiError`] if the ticket is invalid, expired, already consumed,
+/// its associated session is revoked, or an internal error occurs.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/ws-ticket/verify",

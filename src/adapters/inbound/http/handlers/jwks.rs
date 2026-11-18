@@ -10,6 +10,10 @@ use crate::adapters::inbound::http::error::{ApiError, ErrorKind, ProblemDetails}
 use crate::adapters::inbound::http::state::AppState;
 
 /// Serves the public Ed25519 JSON Web Key Set (JWKS) document.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] (`500 Internal Server Error`) if exporting the public JWKS fails.
 #[utoipa::path(
     get,
     path = "/.well-known/jwks.json",

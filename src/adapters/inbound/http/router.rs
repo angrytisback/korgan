@@ -215,11 +215,13 @@ fn cors_layer(settings: &Settings) -> Result<CorsLayer, RouterError> {
 ///
 /// The panic payload is logged for operators but never returned to clients.
 fn panic_response(payload: Box<dyn Any + Send + 'static>) -> Response {
-    let message = payload
-        .downcast_ref::<&str>()
-        .map(|s| (*s).to_owned())
-        .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "non-string panic payload".to_owned());
+    let message = match payload.downcast::<String>() {
+        Ok(s) => *s,
+        Err(payload) => payload.downcast_ref::<&str>().map_or_else(
+            || "non-string panic payload".to_owned(),
+            |s| (*s).to_owned(),
+        ),
+    };
     tracing::error!(panic = %message, "request handler panicked");
     ApiError::new(ErrorKind::Internal).into_response()
 }
