@@ -70,7 +70,7 @@ impl FromRequestParts<AppState> for AuthUser {
             Ok(None) => {}
             Err(e) => {
                 tracing::error!(error = %e, "failed to query session blacklist during auth extraction; failing closed");
-                return Err(ApiError::new(ErrorKind::Internal));
+                return Err(ApiError::new(ErrorKind::ServiceUnavailable));
             }
         }
 
@@ -569,7 +569,9 @@ mod tests {
         }
     }
 
-    struct NoopTokenStore;
+    struct NoopTokenStore {
+        fail_get: bool,
+    }
     #[async_trait]
     impl TokenStore for NoopTokenStore {
         async fn set_token(
@@ -581,6 +583,9 @@ mod tests {
             Ok(())
         }
         async fn get_token(&self, _key: &str) -> Result<Option<String>, PortError> {
+            if self.fail_get {
+                return Err(PortError::cache("redis unreachable"));
+            }
             Ok(None)
         }
         async fn delete_token(&self, _key: &str) -> Result<(), PortError> {
@@ -782,6 +787,14 @@ mod tests {
         mfa_enabled: bool,
         fail_passkeys: bool,
     ) -> Result<(AppState, Arc<CountingPasskeyRepo>), Box<dyn std::error::Error>> {
+        build_test_state(mfa_enabled, fail_passkeys, false)
+    }
+
+    fn build_test_state(
+        mfa_enabled: bool,
+        fail_passkeys: bool,
+        fail_blacklist: bool,
+    ) -> Result<(AppState, Arc<CountingPasskeyRepo>), Box<dyn std::error::Error>> {
         let settings = test_settings()?;
         let now = Utc::now();
 
@@ -829,7 +842,9 @@ mod tests {
             Arc::new(NoopAuditRepo),
             Arc::new(NoopOAuthRepo),
             passkey_repo.clone(),
-            Arc::new(NoopTokenStore),
+            Arc::new(NoopTokenStore {
+                fail_get: fail_blacklist,
+            }),
             Arc::new(NoopRateLimiter),
             Arc::new(NoopHasher),
             Arc::new(StubTokenSigner(claims)),
@@ -910,6 +925,24 @@ mod tests {
             .err()
             .ok_or("hybrid Bearer+cookie request must be rejected")?;
         assert_eq!(err.kind(), ErrorKind::Unauthenticated);
+        Ok(())
+    }
+
+    /// KRG-SEC-04: a Redis outage during the blacklist lookup must fail closed
+    /// with 503 (project invariants), not a generic 500.
+    #[tokio::test]
+    async fn krg_sec_04_blacklist_cache_failure_returns_service_unavailable() -> TestResult {
+        let (state, _) = build_test_state(true, false, true)?;
+        let req = Request::builder()
+            .header(AUTHORIZATION, "Bearer stub-token")
+            .body(())?;
+        let (mut parts, ()) = req.into_parts();
+
+        let err = AuthUser::from_request_parts(&mut parts, &state)
+            .await
+            .err()
+            .ok_or("blacklist failure must reject the request")?;
+        assert_eq!(err.kind(), ErrorKind::ServiceUnavailable);
         Ok(())
     }
 
