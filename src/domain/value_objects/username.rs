@@ -18,18 +18,8 @@ pub const MAX_USERNAME_LENGTH: usize = 30;
 pub struct Username(String);
 
 impl Username {
-    /// Parses, validates, and constructs a [`Username`].
-    ///
-    /// The input is trimmed. It must contain between 3 and 30 characters,
-    /// and consist exclusively of ASCII alphanumeric characters (`a-z`, `A-Z`, `0-9`)
-    /// and underscores (`_`).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DomainError::InvalidUsername`] if length constraints are violated
-    /// or illegal characters are present.
-    pub fn new(raw: impl AsRef<str>) -> Result<Self, DomainError> {
-        let trimmed = raw.as_ref().trim();
+    /// Validates length and character constraints on a trimmed string slice.
+    fn validate_str(trimmed: &str) -> Result<(), DomainError> {
         let len = trimmed.len();
 
         if len < MIN_USERNAME_LENGTH {
@@ -48,24 +38,62 @@ impl Username {
             });
         }
 
-        let is_valid_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
-        if !trimmed.chars().all(is_valid_char) {
+        if !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
             return Err(DomainError::InvalidUsername {
                 reason: "username must contain only ASCII alphanumeric characters and underscores"
                     .to_owned(),
             });
         }
 
+        Ok(())
+    }
+
+    /// Parses, validates, and constructs a [`Username`].
+    ///
+    /// The input is trimmed. It must contain between 3 and 30 characters,
+    /// and consist exclusively of ASCII alphanumeric characters (`a-z`, `A-Z`, `0-9`)
+    /// and underscores (`_`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::InvalidUsername`] if length constraints are violated
+    /// or illegal characters are present.
+    pub fn new(raw: impl AsRef<str>) -> Result<Self, DomainError> {
+        let trimmed = raw.as_ref().trim();
+        Self::validate_str(trimmed)?;
         Ok(Self(trimmed.to_owned()))
     }
 
+    /// Parses, validates, and constructs a [`Username`] from an owned [`String`].
+    ///
+    /// Reuses the existing heap allocation when the string does not have surrounding whitespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DomainError::InvalidUsername`] if length constraints are violated
+    /// or illegal characters are present.
+    pub fn from_string(s: String) -> Result<Self, DomainError> {
+        let trimmed_len = s.trim().len();
+        if trimmed_len == s.len() {
+            Self::validate_str(&s)?;
+            Ok(Self(s))
+        } else {
+            Self::new(&s)
+        }
+    }
+
     /// Returns the underlying username string slice.
+    #[inline]
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consumes the value object and returns the inner [`String`].
+    #[inline]
     #[must_use]
     pub fn into_inner(self) -> String {
         self.0
@@ -73,6 +101,7 @@ impl Username {
 }
 
 impl AsRef<str> for Username {
+    #[inline]
     fn as_ref(&self) -> &str {
         &self.0
     }
@@ -87,14 +116,16 @@ impl fmt::Display for Username {
 impl TryFrom<String> for Username {
     type Error = DomainError;
 
+    #[inline]
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
+        Self::from_string(value)
     }
 }
 
 impl TryFrom<&str> for Username {
     type Error = DomainError;
 
+    #[inline]
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::new(value)
     }
@@ -103,12 +134,14 @@ impl TryFrom<&str> for Username {
 impl FromStr for Username {
     type Err = DomainError;
 
+    #[inline]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::new(s)
     }
 }
 
 impl From<Username> for String {
+    #[inline]
     fn from(username: Username) -> Self {
         username.0
     }

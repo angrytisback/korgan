@@ -1,9 +1,11 @@
 //! Stateful refresh token session domain model.
 
+use std::borrow::Cow;
 use std::net::IpAddr;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use crate::domain::value_objects::{SessionId, TokenFamilyId, UserId};
 
@@ -13,7 +15,7 @@ use crate::domain::value_objects::{SessionId, TokenFamilyId, UserId};
 /// If an already-replaced session token is presented, the entire family is revoked.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
-    /// Unique session identifier (UUIDv7, embedded as `sid` in Access Tokens).
+    /// Unique session identifier (`UUIDv7`, embedded as `sid` in Access Tokens).
     pub id: SessionId,
     /// Owner user account.
     pub user_id: UserId,
@@ -35,13 +37,13 @@ pub struct Session {
     pub expires_at: DateTime<Utc>,
     /// Explicit revocation timestamp, if revoked.
     pub revoked_at: Option<DateTime<Utc>>,
-    /// Reason for revocation (e.g., "user_logout", "token_reuse_detected", "password_reset").
+    /// Reason for revocation (e.g., `"user_logout"`, `"token_reuse_detected"`, `"password_reset"`).
     pub revoke_reason: Option<String>,
     /// Session creation timestamp (initial login time).
     pub created_at: DateTime<Utc>,
     /// Authentication Methods References (RFC 8176). E.g. `["pwd"]`, `["pwd", "mfa"]`, `["passkey"]`.
     #[serde(default)]
-    pub amr: Vec<String>,
+    pub amr: SmallVec<[Cow<'static, str>; 2]>,
 }
 
 impl std::fmt::Debug for Session {
@@ -91,32 +93,36 @@ impl Session {
             revoked_at: None,
             revoke_reason: None,
             created_at: now,
-            amr: Vec::new(),
+            amr: SmallVec::new(),
         }
     }
 
     /// Attaches authentication method references (RFC 8176) to this session.
+    #[inline]
     #[must_use]
-    pub fn with_amr(mut self, amr: Vec<String>) -> Self {
+    pub fn with_amr(mut self, amr: SmallVec<[Cow<'static, str>; 2]>) -> Self {
         self.amr = amr;
         self
     }
 
     /// Returns `true` if the session is currently active and can be used/rotated.
+    #[inline]
     #[must_use]
     pub fn is_valid(&self, now: DateTime<Utc>) -> bool {
         !self.is_replaced && self.revoked_at.is_none() && self.expires_at > now
     }
 
     /// Returns `true` if the session has expired.
+    #[inline]
     #[must_use]
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         self.expires_at <= now
     }
 
     /// Returns `true` if the session has been revoked.
+    #[inline]
     #[must_use]
-    pub fn is_revoked(&self) -> bool {
+    pub const fn is_revoked(&self) -> bool {
         self.revoked_at.is_some()
     }
 
@@ -124,6 +130,7 @@ impl Session {
     ///
     /// Protects against false-positive token family revocation caused by concurrent
     /// browser tab refresh requests presenting the same token before receiving the new cookie.
+    #[inline]
     #[must_use]
     pub fn is_replaced_within_grace(&self, now: DateTime<Utc>, grace_period: Duration) -> bool {
         if !self.is_replaced {
@@ -138,6 +145,8 @@ impl Session {
     /// The current session is marked as `is_replaced = true`.
     /// The original `created_at` (login timestamp / `auth_time`) and `amr` are preserved
     /// for downstream banking/step-up authorization checks.
+    #[inline]
+    #[must_use]
     pub fn rotate(
         &mut self,
         new_refresh_token_hash: String,
@@ -168,12 +177,14 @@ impl Session {
     }
 
     /// Explicitly revokes this session with a reason.
+    #[inline]
     pub fn revoke(&mut self, reason: impl Into<String>, now: DateTime<Utc>) {
         self.revoked_at = Some(now);
         self.revoke_reason = Some(reason.into());
     }
 
     /// Updates the last active timestamp and optionally metadata.
+    #[inline]
     pub fn update_activity(
         &mut self,
         now: DateTime<Utc>,

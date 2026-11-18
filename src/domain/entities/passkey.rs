@@ -8,7 +8,7 @@ use crate::domain::value_objects::{PasskeyId, UserId};
 /// Registered FIDO2 / WebAuthn passkey credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Passkey {
-    /// Unique credential identifier in the IAM system (UUIDv7).
+    /// Unique credential identifier in the IAM system (`UUIDv7`).
     pub id: PasskeyId,
     /// User account that owns this passkey credential.
     pub user_id: UserId,
@@ -16,7 +16,7 @@ pub struct Passkey {
     pub credential_id: Vec<u8>,
     /// Serialized passkey JSON containing credential public key and counter metadata.
     pub passkey_json: serde_json::Value,
-    /// User-friendly label (e.g. "MacBook Touch ID", "YubiKey 5C").
+    /// User-friendly label (e.g. `MacBook Touch ID`, `YubiKey 5C`).
     pub name: String,
     /// Timestamp when this passkey was last successfully used for authentication.
     pub last_used_at: Option<DateTime<Utc>>,
@@ -34,11 +34,13 @@ impl Passkey {
         name: impl Into<String>,
     ) -> Self {
         let name_str = name.into();
-        let name_trimmed = name_str.trim();
-        let final_name = if name_trimmed.is_empty() {
+        let trimmed_len = name_str.trim().len();
+        let final_name = if trimmed_len == 0 {
             "Passkey".to_owned()
+        } else if trimmed_len == name_str.len() {
+            name_str
         } else {
-            name_trimmed.to_owned()
+            name_str.trim().to_owned()
         };
 
         Self {
@@ -53,11 +55,13 @@ impl Passkey {
     }
 
     /// Records that the passkey was used for authentication.
-    pub fn record_usage(&mut self, now: DateTime<Utc>) {
+    #[inline]
+    pub const fn record_usage(&mut self, now: DateTime<Utc>) {
         self.last_used_at = Some(now);
     }
 
     /// Updates the serialized passkey JSON (e.g., when the counter advances).
+    #[inline]
     pub fn update_passkey_json(&mut self, json: serde_json::Value) {
         self.passkey_json = json;
     }

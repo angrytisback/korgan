@@ -70,18 +70,21 @@ impl RawPassword {
     }
 
     /// Exposes the inner normalized password string for cryptographic operations.
+    #[inline]
     #[must_use]
     pub fn expose_secret(&self) -> &str {
         &self.secret
     }
 
     /// Exposes the inner normalized password as a byte slice.
+    #[inline]
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
+    pub const fn as_bytes(&self) -> &[u8] {
         self.secret.as_bytes()
     }
 
     /// Returns the character count of the normalized password.
+    #[inline]
     #[must_use]
     pub fn char_count(&self) -> usize {
         self.secret.chars().count()
@@ -103,6 +106,7 @@ impl fmt::Display for RawPassword {
 impl TryFrom<String> for RawPassword {
     type Error = DomainError;
 
+    #[inline]
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::new(value)
     }
@@ -111,6 +115,7 @@ impl TryFrom<String> for RawPassword {
 impl TryFrom<&str> for RawPassword {
     type Error = DomainError;
 
+    #[inline]
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::new(value)
     }
@@ -153,12 +158,14 @@ impl PasswordHash {
     }
 
     /// Returns the hash string slice.
+    #[inline]
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consumes the wrapper and returns the inner [`String`].
+    #[inline]
     #[must_use]
     pub fn into_inner(self) -> String {
         self.0
@@ -166,6 +173,7 @@ impl PasswordHash {
 }
 
 impl AsRef<str> for PasswordHash {
+    #[inline]
     fn as_ref(&self) -> &str {
         &self.0
     }
@@ -180,6 +188,7 @@ impl fmt::Display for PasswordHash {
 impl TryFrom<String> for PasswordHash {
     type Error = DomainError;
 
+    #[inline]
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::new(value)
     }
@@ -188,6 +197,7 @@ impl TryFrom<String> for PasswordHash {
 impl TryFrom<&str> for PasswordHash {
     type Error = DomainError;
 
+    #[inline]
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::new(value)
     }
@@ -196,12 +206,14 @@ impl TryFrom<&str> for PasswordHash {
 impl FromStr for PasswordHash {
     type Err = DomainError;
 
+    #[inline]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::new(s)
     }
 }
 
 impl From<PasswordHash> for String {
+    #[inline]
     fn from(hash: PasswordHash) -> Self {
         hash.0
     }
