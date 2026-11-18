@@ -1,6 +1,7 @@
 //! HTTP middleware: request correlation, RFC 9457 normalisation, security
 //! headers and sliding-window rate limiting.
 
+pub mod origin;
 pub mod rate_limit;
 pub mod request_id;
 pub mod security_headers;

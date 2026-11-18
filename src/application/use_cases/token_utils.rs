@@ -12,6 +12,8 @@ use crate::application::error::AppError;
 use crate::application::use_cases::shielded;
 use crate::domain::value_objects::SessionId;
 use crate::ports::cache::TokenStore;
+use crate::ports::errors::PortError;
+use crate::ports::services::SecretCipher;
 
 const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const BACKUP_CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -120,13 +122,17 @@ pub fn encode_base32(data: &[u8]) -> String {
         while bits_left >= 5 {
             bits_left -= 5;
             let index = ((buffer >> bits_left) & 0x1F) as usize;
-            result.push(char::from(BASE32_ALPHABET[index]));
+            if let Some(&c) = BASE32_ALPHABET.get(index) {
+                result.push(char::from(c));
+            }
         }
     }
 
     if bits_left > 0 {
         let index = ((buffer << (5 - bits_left)) & 0x1F) as usize;
-        result.push(char::from(BASE32_ALPHABET[index]));
+        if let Some(&c) = BASE32_ALPHABET.get(index) {
+            result.push(char::from(c));
+        }
     }
 
     result
@@ -164,9 +170,16 @@ pub fn decode_base32(input: &str) -> Option<Vec<u8>> {
 
 /// Generates 10 single-use 8-character backup codes.
 ///
-/// Returns `(plaintext_codes, sha256_hashes)`.
-#[must_use]
-pub fn generate_backup_codes(count: usize) -> (Vec<String>, Vec<String>) {
+/// Returns `(plaintext_codes, keyed_hashes)`; each hash is computed by
+/// [`SecretCipher::backup_code_hash`] (HMAC under a server-side key).
+///
+/// # Errors
+///
+/// Returns [`PortError`] if the keyed digest cannot be computed.
+pub fn generate_backup_codes(
+    count: usize,
+    cipher: &dyn SecretCipher,
+) -> Result<(Vec<String>, Vec<String>), PortError> {
     let mut plaintexts = Vec::with_capacity(count);
     let mut hashes = Vec::with_capacity(count);
     let mut rng = rand::rng();
@@ -175,13 +188,15 @@ pub fn generate_backup_codes(count: usize) -> (Vec<String>, Vec<String>) {
         let mut code = String::with_capacity(8);
         for _ in 0..8 {
             let idx = rng.random_range(0..BACKUP_CODE_ALPHABET.len());
-            code.push(char::from(BACKUP_CODE_ALPHABET[idx]));
+            if let Some(&c) = BACKUP_CODE_ALPHABET.get(idx) {
+                code.push(char::from(c));
+            }
         }
-        hashes.push(hash_token(&code));
+        hashes.push(cipher.backup_code_hash(&code)?);
         plaintexts.push(code);
     }
 
-    (plaintexts, hashes)
+    Ok((plaintexts, hashes))
 }
 
 #[cfg(test)]
@@ -214,14 +229,37 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_backup_codes() {
-        let (plain, hashes) = generate_backup_codes(10);
+    fn test_generate_backup_codes() -> Result<(), PortError> {
+        struct PrefixCipher;
+        impl SecretCipher for PrefixCipher {
+            fn encrypt_with_aad(
+                &self,
+                _plaintext: &[u8],
+                _aad: &[u8],
+            ) -> Result<(Vec<u8>, Vec<u8>), PortError> {
+                Err(PortError::crypto("unused"))
+            }
+            fn decrypt_with_aad(
+                &self,
+                _ciphertext: &[u8],
+                _nonce: &[u8],
+                _aad: &[u8],
+            ) -> Result<crate::ports::services::DecryptedSecret, PortError> {
+                Err(PortError::crypto("unused"))
+            }
+            fn backup_code_hash(&self, code: &str) -> Result<String, PortError> {
+                Ok(format!("keyed:{code}"))
+            }
+        }
+
+        let (plain, hashes) = generate_backup_codes(10, &PrefixCipher)?;
         assert_eq!(plain.len(), 10);
         assert_eq!(hashes.len(), 10);
         for (p, h) in plain.iter().zip(hashes.iter()) {
             assert_eq!(p.len(), 8);
-            assert_eq!(&hash_token(p), h);
+            assert_eq!(&format!("keyed:{p}"), h);
         }
+        Ok(())
     }
 
     #[derive(Default)]

@@ -364,6 +364,11 @@ impl PasswordHasher for NoopHasher {
 
 struct NoopCipher;
 impl SecretCipher for NoopCipher {
+    fn backup_code_hash(&self, code: &str) -> Result<String, PortError> {
+        Ok(korgan::application::use_cases::token_utils::hash_token(
+            code,
+        ))
+    }
     fn encrypt_with_aad(&self, _p: &[u8], _a: &[u8]) -> Result<(Vec<u8>, Vec<u8>), PortError> {
         Ok((Vec::new(), vec![0u8; 12]))
     }
@@ -626,7 +631,7 @@ async fn m3_2_extract_token_zero_copy_end_to_end_via_auth_user() -> TestResult {
     let req = Request::builder()
         .header(
             COOKIE,
-            "my_access_token=decoy;  access_token=cookie.jwt.token  ; theme=dark",
+            "my_access_token=decoy;  __Host-access_token=cookie.jwt.token  ; theme=dark",
         )
         .body(())?;
     let (mut parts, ()) = req.into_parts();
@@ -658,7 +663,7 @@ async fn m3_2_extract_token_zero_copy_end_to_end_via_auth_user() -> TestResult {
     // Case 3: Empty Bearer falls back to Cookie access_token
     let req = Request::builder()
         .header(AUTHORIZATION, "Bearer    ")
-        .header(COOKIE, "access_token=fallback.tok")
+        .header(COOKIE, "__Host-access_token=fallback.tok")
         .body(())?;
     let (mut parts, ()) = req.into_parts();
     let hdr = parts
@@ -687,7 +692,7 @@ async fn m3_2_extract_token_zero_copy_end_to_end_via_auth_user() -> TestResult {
     for (name, val) in [
         (AUTHORIZATION, "bearer lowercase"),
         (AUTHORIZATION, "Basic dXNlcjpwYXNz"),
-        (COOKIE, "my_access_token=nope; access_token=   "),
+        (COOKIE, "my_access_token=nope; __Host-access_token=   "),
     ] {
         let req = Request::builder().header(name, val).body(())?;
         let (mut parts, ()) = req.into_parts();

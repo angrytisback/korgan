@@ -206,7 +206,7 @@ In addition to the global budget, `POST /auth/register`, `POST /password/forgot`
 
 ### Health probes and metrics
 - `/health`, `/health/live`, `/health/ready` and `/metrics` bypass the Redis rate limiter. Liveness therefore stays `200` during a Redis outage; readiness returns `503` when PostgreSQL or Redis is unreachable.
-- `server.metrics_addr` (optional, e.g. `127.0.0.1:9100`): serve `/metrics` on a dedicated listener instead of the public one. When set, `/metrics` is no longer reachable on the public port.
+- `server.metrics_addr` (required in production, optional otherwise; e.g. `127.0.0.1:9100`): serve `/metrics` on a dedicated listener instead of the public one. When set, `/metrics` is no longer reachable on the public port.
 
 ### Graceful shutdown
 On `SIGTERM`/`SIGINT` Korgan stops accepting connections, waits up to `server.shutdown_grace_secs` for in-flight requests, drains shielded tasks (`workers.shutdown_drain_secs`), then signals and joins the workers. Workers are drained even if the server itself failed, and a worker that terminated abnormally makes the process exit with a non-zero code.

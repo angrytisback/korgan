@@ -1149,7 +1149,11 @@ async fn test_oauth_new_user_signup_and_cookie_issuance() -> TestResult {
         .iter()
         .map(|v| v.to_str().unwrap_or_default().to_owned())
         .collect();
-    assert!(cookies.iter().any(|c| c.starts_with("access_token=")));
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c.starts_with("__Host-access_token="))
+    );
     assert!(cookies.iter().any(|c| c.contains("refresh_token=")));
 
     // Verify tokens in JSON body

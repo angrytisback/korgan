@@ -28,7 +28,8 @@ request_body_limit_bytes = 1048576
 request_timeout_secs = 30
 shutdown_grace_secs = 30
 # Optional dedicated listener for /metrics (ip:port). When set, /metrics is no
-# longer served on the public listener. Example: "127.0.0.1:9100"
+# longer served on the public listener. REQUIRED when environment = "production".
+# Example: "127.0.0.1:9100"
 # metrics_addr = "127.0.0.1:9100"
 
 [telemetry]
@@ -82,8 +83,6 @@ max_failed_login_attempts = 5
 lockout_duration_secs = 900
 password_history_depth = 5
 account_deletion_grace_days = 30
-# Optional `Domain` attribute for auth cookies (host-only when unset).
-# cookie_domain = "example.com"
 
 [mail]
 # "console" | "smtp" | "resend" | "ses"

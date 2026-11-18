@@ -21,6 +21,7 @@ use super::error::{ApiError, ErrorKind, problem_details_middleware};
 use super::handlers::{
     admin, auth, fallback, health, jwks, metrics, mfa, oauth, passkeys, password, sessions, users,
 };
+use super::middleware::origin::origin_check_middleware;
 use super::middleware::rate_limit::{
     EndpointLimit, endpoint_rate_limit_middleware, rate_limit_middleware,
 };
@@ -52,10 +53,11 @@ pub enum RouterError {
 /// 2. request id / tracing span
 /// 3. security headers
 /// 4. CORS
-/// 5. sliding-window rate limiting
-/// 6. panic catcher (panics become RFC 9457 `500`s)
-/// 7. RFC 9457 normaliser for framework-generated errors
-/// 8. request timeout and body-size limit
+/// 5. `Origin` check on state-changing requests (CSRF)
+/// 6. sliding-window rate limiting
+/// 7. panic catcher (panics become RFC 9457 `500`s)
+/// 8. RFC 9457 normaliser for framework-generated errors
+/// 9. request timeout and body-size limit
 ///
 /// # Errors
 ///
@@ -73,6 +75,7 @@ pub fn build_router(state: AppState) -> Result<Router, RouterError> {
         .layer(from_fn(request_id_middleware))
         .layer(from_fn(security_headers_middleware))
         .layer(cors)
+        .layer(from_fn_with_state(state.clone(), origin_check_middleware))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
         .layer(CatchPanicLayer::custom(panic_response))
         .layer(from_fn(problem_details_middleware))

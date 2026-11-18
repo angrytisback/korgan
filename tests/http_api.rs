@@ -1097,7 +1097,7 @@ async fn test_dual_mode_login_and_auth_extractor() -> TestResult {
         .filter_map(|h| h.to_str().ok().map(ToOwned::to_owned))
         .collect();
 
-    assert!(cookies.iter().any(|c| c.contains("access_token=")
+    assert!(cookies.iter().any(|c| c.contains("__Host-access_token=")
         && c.contains("HttpOnly")
         && c.contains("SameSite=Strict")));
     assert!(
@@ -1143,7 +1143,8 @@ async fn test_dual_mode_login_and_auth_extractor() -> TestResult {
     let req_auth_cookie = Request::builder()
         .method(Method::GET)
         .uri("/api/v1/users/me")
-        .header(COOKIE, format!("access_token={access_token}"))
+        .header(COOKIE, format!("__Host-access_token={access_token}"))
+        .header("Origin", "http://localhost:3000")
         .body(Body::empty())?;
 
     let res_cookie_profile = send_request(&ctx.app, req_auth_cookie).await?;
@@ -1199,7 +1200,7 @@ async fn test_dual_mode_login_and_auth_extractor() -> TestResult {
     assert!(
         logout_cookies
             .iter()
-            .any(|c| c.contains("access_token=") && c.contains("Max-Age=0"))
+            .any(|c| c.contains("__Host-access_token=") && c.contains("Max-Age=0"))
     );
     assert!(
         logout_cookies
@@ -1352,7 +1353,8 @@ async fn test_refresh_ambiguous_token_injection_rejected() -> TestResult {
         .uri("/api/v1/auth/refresh")
         .header(CONTENT_TYPE, "application/json")
         .header("X-Client-Type", "web")
-        .header(COOKIE, format!("refresh_token={refresh_token}"))
+        .header(COOKIE, format!("__Host-refresh_token={refresh_token}"))
+        .header("Origin", "http://localhost:3000")
         .body(Body::from(serde_json::to_vec(&ambiguous_payload)?))?;
 
     let res_ambiguous_web = send_request(&ctx.app, req_ambiguous_web).await?;
@@ -1372,7 +1374,8 @@ async fn test_refresh_ambiguous_token_injection_rejected() -> TestResult {
         .uri("/api/v1/auth/refresh")
         .header(CONTENT_TYPE, "application/json")
         .header("X-Client-Type", "cli")
-        .header(COOKIE, format!("refresh_token={refresh_token}"))
+        .header(COOKIE, format!("__Host-refresh_token={refresh_token}"))
+        .header("Origin", "http://localhost:3000")
         .body(Body::from(serde_json::to_vec(&ambiguous_payload)?))?;
 
     let res_ambiguous_cli = send_request(&ctx.app, req_ambiguous_cli).await?;
@@ -1398,7 +1401,8 @@ async fn test_refresh_ambiguous_token_injection_rejected() -> TestResult {
         .method(Method::POST)
         .uri("/api/v1/auth/refresh")
         .header("X-Client-Type", "mobile")
-        .header(COOKIE, format!("refresh_token={refresh_token}"))
+        .header(COOKIE, format!("__Host-refresh_token={refresh_token}"))
+        .header("Origin", "http://localhost:3000")
         .body(Body::empty())?;
 
     let res_mobile_cookie_only = send_request(&ctx.app, req_mobile_cookie_only).await?;
@@ -1411,7 +1415,8 @@ async fn test_refresh_ambiguous_token_injection_rejected() -> TestResult {
     let req_cli_cookie_only = Request::builder()
         .method(Method::POST)
         .uri("/api/v1/auth/refresh")
-        .header(COOKIE, format!("refresh_token={refresh_token}"))
+        .header(COOKIE, format!("__Host-refresh_token={refresh_token}"))
+        .header("Origin", "http://localhost:3000")
         .body(Body::empty())?;
 
     let res_cli_cookie_only = send_request(&ctx.app, req_cli_cookie_only).await?;
@@ -1425,7 +1430,8 @@ async fn test_refresh_ambiguous_token_injection_rejected() -> TestResult {
         .uri("/api/v1/auth/logout")
         .header(AUTHORIZATION, format!("Bearer {access_token}"))
         .header("X-Client-Type", "web")
-        .header(COOKIE, format!("refresh_token={refresh_token}"))
+        .header(COOKIE, format!("__Host-refresh_token={refresh_token}"))
+        .header("Origin", "http://localhost:3000")
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(serde_json::to_vec(&ambiguous_payload)?))?;
 
@@ -1458,7 +1464,8 @@ async fn test_refresh_ambiguous_token_injection_rejected() -> TestResult {
         .uri("/api/v1/auth/logout")
         .header(AUTHORIZATION, format!("Bearer {access_token}"))
         .header("X-Client-Type", "mobile")
-        .header(COOKIE, format!("refresh_token={refresh_token}"))
+        .header(COOKIE, format!("__Host-refresh_token={refresh_token}"))
+        .header("Origin", "http://localhost:3000")
         .body(Body::empty())?;
 
     let res_logout_mobile_cookie = send_request(&ctx.app, req_logout_mobile_cookie).await?;
@@ -1525,7 +1532,8 @@ async fn test_r3_exhaustive_channel_separation_matrix() -> TestResult {
                 .method(Method::POST)
                 .uri("/api/v1/auth/refresh")
                 .header(CONTENT_TYPE, "application/json")
-                .header(COOKIE, format!("refresh_token={refresh_token}"));
+                .header(COOKIE, format!("__Host-refresh_token={refresh_token}"))
+                .header("Origin", "http://localhost:3000");
             if let Some(ch) = client_hdr {
                 req_b = req_b.header("X-Client-Type", ch);
             }
@@ -1546,7 +1554,8 @@ async fn test_r3_exhaustive_channel_separation_matrix() -> TestResult {
                 .method(Method::POST)
                 .uri("/api/v1/auth/refresh")
                 .header(CONTENT_TYPE, "application/json")
-                .header(COOKIE, format!("__Host-refresh_token={refresh_token}"));
+                .header(COOKIE, format!("__Host-refresh_token={refresh_token}"))
+                .header("Origin", "http://localhost:3000");
             if let Some(ch) = client_hdr {
                 req_b = req_b.header("X-Client-Type", ch);
             }
@@ -1594,7 +1603,8 @@ async fn test_r3_exhaustive_channel_separation_matrix() -> TestResult {
             let mut req_b = Request::builder()
                 .method(Method::POST)
                 .uri("/api/v1/auth/refresh")
-                .header(COOKIE, format!("refresh_token={refresh_token}"));
+                .header(COOKIE, format!("__Host-refresh_token={refresh_token}"))
+                .header("Origin", "http://localhost:3000");
             if let Some(ch) = client_hdr {
                 req_b = req_b.header("X-Client-Type", ch);
             }
@@ -1622,7 +1632,8 @@ async fn test_r3_exhaustive_channel_separation_matrix() -> TestResult {
             let mut req_b = Request::builder()
                 .method(Method::POST)
                 .uri("/api/v1/auth/refresh")
-                .header(COOKIE, format!("__Host-refresh_token={refresh_token}"));
+                .header(COOKIE, format!("__Host-refresh_token={refresh_token}"))
+                .header("Origin", "http://localhost:3000");
             if let Some(ch) = client_hdr {
                 req_b = req_b.header("X-Client-Type", ch);
             }
@@ -1710,7 +1721,8 @@ async fn test_r3_exhaustive_channel_separation_matrix() -> TestResult {
                 .uri("/api/v1/auth/logout")
                 .header(AUTHORIZATION, format!("Bearer {access_token}"))
                 .header(CONTENT_TYPE, "application/json")
-                .header(COOKIE, format!("refresh_token={refresh_token}"));
+                .header(COOKIE, format!("__Host-refresh_token={refresh_token}"))
+                .header("Origin", "http://localhost:3000");
             if let Some(ch) = client_hdr {
                 req_b = req_b.header("X-Client-Type", ch);
             }
@@ -1733,7 +1745,8 @@ async fn test_r3_exhaustive_channel_separation_matrix() -> TestResult {
                 .uri("/api/v1/auth/logout")
                 .header(AUTHORIZATION, format!("Bearer {access_token}"))
                 .header(CONTENT_TYPE, "application/json")
-                .header(COOKIE, format!("access_token={access_token}"));
+                .header(COOKIE, format!("__Host-access_token={access_token}"))
+                .header("Origin", "http://localhost:3000");
             if let Some(ch) = client_hdr {
                 req_b = req_b.header("X-Client-Type", ch);
             }
@@ -1806,7 +1819,8 @@ async fn test_r3_exhaustive_channel_separation_matrix() -> TestResult {
                 .method(Method::POST)
                 .uri("/api/v1/auth/logout")
                 .header(AUTHORIZATION, format!("Bearer {at}"))
-                .header(COOKIE, format!("refresh_token={rt}"));
+                .header(COOKIE, format!("__Host-refresh_token={rt}"))
+                .header("Origin", "http://localhost:3000");
             if let Some(ch) = client_hdr {
                 req_b = req_b.header("X-Client-Type", ch);
             }
@@ -1851,7 +1865,8 @@ async fn test_r3_exhaustive_channel_separation_matrix() -> TestResult {
                 .method(Method::POST)
                 .uri("/api/v1/auth/logout")
                 .header(AUTHORIZATION, format!("Bearer {at}"))
-                .header(COOKIE, format!("__Host-refresh_token={rt}"));
+                .header(COOKIE, format!("__Host-refresh_token={rt}"))
+                .header("Origin", "http://localhost:3000");
             if let Some(ch) = client_hdr {
                 req_b = req_b.header("X-Client-Type", ch);
             }

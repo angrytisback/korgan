@@ -761,6 +761,11 @@ impl TotpService for MockTotpServiceValid {
 struct MockSecretCipherEcho;
 
 impl SecretCipher for MockSecretCipherEcho {
+    fn backup_code_hash(&self, code: &str) -> Result<String, PortError> {
+        Ok(korgan::application::use_cases::token_utils::hash_token(
+            code,
+        ))
+    }
     fn encrypt(&self, secret: &[u8]) -> Result<(Vec<u8>, Vec<u8>), PortError> {
         Ok((secret.to_vec(), vec![0u8; 12]))
     }

@@ -394,9 +394,6 @@ pub struct AuthSettings {
     pub password_history_depth: u16,
     /// Grace period before a `pending_deletion` account is purged.
     pub account_deletion_grace_days: u32,
-    /// Optional `Domain` attribute for auth cookies.
-    #[serde(default)]
-    pub cookie_domain: Option<String>,
 }
 
 /// Outbound mail settings.
@@ -616,6 +613,12 @@ impl Settings {
             && addr.parse::<SocketAddr>().is_err()
         {
             problems.push("server.metrics_addr must be a valid ip:port socket address".to_owned());
+        }
+        if self.is_production() && server.metrics_addr.is_none() {
+            problems.push(
+                "server.metrics_addr must be set in production (/metrics is unauthenticated and must not be served on the public listener)"
+                    .to_owned(),
+            );
         }
         if server.request_body_limit_bytes == 0 {
             problems.push("server.request_body_limit_bytes must be greater than zero".to_owned());
@@ -1081,6 +1084,10 @@ mod tests {
         let mut env = base_env();
         env.extend([
             (
+                "KORGAN__SERVER__METRICS_ADDR".to_owned(),
+                "127.0.0.1:9100".to_owned(),
+            ),
+            (
                 "KORGAN__SERVER__ENVIRONMENT".to_owned(),
                 "production".to_owned(),
             ),
@@ -1255,6 +1262,14 @@ mod tests {
         let problems = problems_of(Settings::load_from_env(env));
         assert!(problems.iter().any(|p| p.contains("mail.provider")));
         assert!(problems.iter().any(|p| p.contains("hibp.enabled")));
+    }
+
+    #[test]
+    fn production_requires_dedicated_metrics_listener() {
+        let mut env = production_env();
+        env.remove("KORGAN__SERVER__METRICS_ADDR");
+        let problems = problems_of(Settings::load_from_env(env));
+        assert!(problems.iter().any(|p| p.contains("metrics_addr")));
     }
 
     #[test]
