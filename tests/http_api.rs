@@ -1725,7 +1725,8 @@ async fn test_r3_exhaustive_channel_separation_matrix() -> TestResult {
             );
         }
 
-        // 2. Ambiguous: access_token Cookie + Body ("token" alias) -> MUST BE 422
+        // 2. Hybrid: Bearer header + access_token Cookie -> rejected by the auth
+        //    extractor before any body handling (KRG-SEC-01) -> MUST BE 401
         {
             let mut req_b = Request::builder()
                 .method(Method::POST)
@@ -1742,8 +1743,8 @@ async fn test_r3_exhaustive_channel_separation_matrix() -> TestResult {
             let res = send_request(&ctx.app, req).await?;
             assert_eq!(
                 res.status(),
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Ambiguous logout with access_token cookie must be 422 for {client_hdr:?}"
+                StatusCode::UNAUTHORIZED,
+                "Hybrid Bearer + access_token cookie must be rejected with 401 for {client_hdr:?}"
             );
         }
 

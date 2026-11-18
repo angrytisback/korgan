@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use base64::prelude::{BASE64_URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use ed25519_dalek::pkcs8::DecodePrivateKey;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -219,16 +219,17 @@ impl TokenSigner for Ed25519JwtService {
     }
 
     fn verify_access_token(&self, token: &str) -> Result<AccessTokenClaims, PortError> {
-        let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() != 3 {
+        let mut segments = token.split('.');
+        let (Some(header_b64), Some(payload_b64), Some(sig_b64), None) = (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+        ) else {
             return Err(PortError::security(
                 "malformed JWT: expected 3 dot-separated segments",
             ));
-        }
-
-        let header_b64 = parts[0];
-        let payload_b64 = parts[1];
-        let sig_b64 = parts[2];
+        };
 
         let header_bytes = BASE64_URL_SAFE_NO_PAD
             .decode(header_b64)
@@ -279,9 +280,14 @@ impl TokenSigner for Ed25519JwtService {
             PortError::security(format!("invalid Ed25519 signature length/format: {e}"))
         })?;
 
-        let signing_input = &token.as_bytes()[..header_b64.len() + 1 + payload_b64.len()];
+        let signing_input = token
+            .as_bytes()
+            .get(..header_b64.len() + 1 + payload_b64.len())
+            .ok_or_else(|| PortError::security("malformed JWT: signing input out of bounds"))?;
+        // `verify_strict` additionally rejects small-order public keys and
+        // non-canonical signatures (RFC 8032 malleability hardening).
         verifying_key
-            .verify(signing_input, &signature)
+            .verify_strict(signing_input, &signature)
             .map_err(|e| PortError::security(format!("JWT signature verification failed: {e}")))?;
 
         let payload_bytes = BASE64_URL_SAFE_NO_PAD
