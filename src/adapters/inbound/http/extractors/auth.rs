@@ -262,33 +262,39 @@ impl FromRequestParts<AppState> for StepUpUser {
 /// Extracts access token from Authorization header (`Bearer <token>`) or Cookie (`access_token=<token>`).
 #[inline]
 fn extract_token(parts: &Parts) -> Result<&str, ApiError> {
-    // 1. Check Authorization: Bearer <token>
-    if let Some(auth_header) = parts.headers.get(AUTHORIZATION)
-        && let Ok(auth_str) = auth_header.to_str()
-        && let Some(token) = auth_str.strip_prefix("Bearer ")
-    {
-        let trimmed = token.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed);
-        }
-    }
+    // 1. Authorization: Bearer <token>
+    let bearer = parts
+        .headers
+        .get(AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
 
-    // 2. Check Cookie: access_token=<token>
-    if let Some(cookie_hdr) = parts.headers.get(http::header::COOKIE)
-        && let Ok(cookie_str) = cookie_hdr.to_str()
-    {
-        for cookie in cookie_str.split(';') {
-            let cookie = cookie.trim();
-            if let Some(token) = cookie.strip_prefix("access_token=") {
-                let trimmed = token.trim();
-                if !trimmed.is_empty() {
-                    return Ok(trimmed);
-                }
-            }
-        }
-    }
+    // 2. Cookie: access_token=<token>
+    let cookie_token = parts
+        .headers
+        .get(http::header::COOKIE)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|cookies| {
+            cookies
+                .split(';')
+                .filter_map(|c| c.trim().strip_prefix("access_token="))
+                .map(str::trim)
+                .find(|t| !t.is_empty())
+        });
 
-    Err(ApiError::new(ErrorKind::Unauthenticated))
+    match (bearer, cookie_token) {
+        // Hybrid requests mixing both channels are rejected outright so a
+        // caller-supplied header can never shadow (or be confused with) a
+        // browser session cookie.
+        (Some(_), Some(_)) => {
+            tracing::warn!("rejecting hybrid request carrying both Bearer header and cookie");
+            Err(ApiError::new(ErrorKind::Unauthenticated))
+        }
+        (Some(token), None) | (None, Some(token)) => Ok(token),
+        (None, None) => Err(ApiError::new(ErrorKind::Unauthenticated)),
+    }
 }
 
 #[cfg(test)]
@@ -887,6 +893,23 @@ mod tests {
             .body(())?;
         let (empty_parts, ()) = empty_req.into_parts();
         assert!(extract_token(&empty_parts).is_err());
+        Ok(())
+    }
+
+    /// KRG-SEC-01: a request carrying both a Bearer header and an access-token
+    /// cookie is a hybrid request and must be rejected, never silently resolved.
+    #[test]
+    fn krg_sec_01_extract_token_rejects_hybrid_bearer_and_cookie() -> TestResult {
+        let req = Request::builder()
+            .header(AUTHORIZATION, "Bearer attacker.chosen.token")
+            .header(COOKIE, "access_token=victim.session.token")
+            .body(())?;
+        let (parts, ()) = req.into_parts();
+
+        let err = extract_token(&parts)
+            .err()
+            .ok_or("hybrid Bearer+cookie request must be rejected")?;
+        assert_eq!(err.kind(), ErrorKind::Unauthenticated);
         Ok(())
     }
 
