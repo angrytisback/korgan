@@ -57,9 +57,8 @@ impl VerifyEmailUseCase {
         let key = format!("verify_email:{token_hash}");
 
         // Single-use: atomically retrieve and delete token
-        let user_id_str = match self.token_store.get_and_delete(&key).await? {
-            Some(s) => s,
-            None => return Err(AppError::TokenInvalid),
+        let Some(user_id_str) = self.token_store.get_and_delete(&key).await? else {
+            return Err(AppError::TokenInvalid);
         };
 
         let user_id: UserId = user_id_str

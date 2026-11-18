@@ -95,6 +95,7 @@ impl std::fmt::Debug for ChangePasswordCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChangePasswordCommand")
             .field("user_id", &self.user_id)
+            .field("current_session_id", &self.current_session_id)
             .field("current_password", &"[REDACTED]")
             .field("new_password", &"[REDACTED]")
             .field("ip_address", &self.ip_address)

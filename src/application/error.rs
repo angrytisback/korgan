@@ -115,13 +115,13 @@ impl From<DomainError> for AppError {
             DomainError::AccountLocked { .. }
             | DomainError::AccountNotActive { .. }
             | DomainError::InsufficientPermissions { .. } => Self::Forbidden,
-            DomainError::NoPasswordSet => Self::InvalidCredentials,
-            DomainError::SessionExpired => Self::TokenExpired,
+            DomainError::NoPasswordSet | DomainError::PasskeyVerificationFailed { .. } => {
+                Self::InvalidCredentials
+            }
+            DomainError::SessionExpired | DomainError::ChallengeExpired => Self::TokenExpired,
             DomainError::SessionRevoked => Self::TokenInvalid,
             DomainError::TokenReuseDetected => Self::TokenReuseDetected,
             DomainError::PasskeyNotFound => Self::NotFound,
-            DomainError::ChallengeExpired => Self::TokenExpired,
-            DomainError::PasskeyVerificationFailed { .. } => Self::InvalidCredentials,
         }
     }
 }
@@ -161,10 +161,10 @@ impl From<validator::ValidationErrors> for AppError {
         let mut violations = Vec::new();
         for (field, field_errs) in errors.field_errors() {
             for err in field_errs {
-                let reason = match &err.message {
-                    Some(msg) => msg.to_string(),
-                    None => format!("invalid value (rule: {})", err.code),
-                };
+                let reason = err.message.as_ref().map_or_else(
+                    || format!("invalid value (rule: {})", err.code),
+                    ToString::to_string,
+                );
                 violations.push(FieldViolation::new(field.to_string(), reason));
             }
         }
@@ -211,9 +211,8 @@ mod tests {
         let d = Dummy {
             email: "not-an-email".to_owned(),
         };
-        let val_err = match d.validate() {
-            Ok(_) => return Err("expected validation error".into()),
-            Err(e) => e,
+        let Err(val_err) = d.validate() else {
+            return Err("expected validation error".into());
         };
         let app_err: AppError = val_err.into();
         match app_err {

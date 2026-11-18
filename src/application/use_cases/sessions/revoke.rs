@@ -6,6 +6,7 @@ use validator::Validate;
 
 use crate::application::dto::RevokeSessionCommand;
 use crate::application::error::AppError;
+use crate::application::use_cases::token_utils::{SESSION_BLACKLIST_TTL, blacklist_sessions};
 use crate::application::workers::EventBus;
 use crate::domain::entities::audit_events;
 use crate::domain::entities::{AuditEventStatus, AuditLog};
@@ -84,21 +85,11 @@ impl RevokeSessionUseCase {
             )
             .await?;
 
-        let token_store = self.token_store.clone();
-        let session_id = cmd.session_id;
-        crate::application::use_cases::shielded(move || {
-            let token_store = token_store.clone();
-            async move {
-                token_store
-                    .set_token(
-                        &format!("blacklist:session:{session_id}"),
-                        "revoked",
-                        std::time::Duration::from_secs(30 * 86400),
-                    )
-                    .await?;
-                Ok(())
-            }
-        })
+        blacklist_sessions(
+            self.token_store.clone(),
+            &[cmd.session_id],
+            SESSION_BLACKLIST_TTL,
+        )
         .await?;
 
         Ok(())

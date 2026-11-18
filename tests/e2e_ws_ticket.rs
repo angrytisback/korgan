@@ -833,13 +833,13 @@ async fn test_ws_ticket_issuance_and_single_use_verification_lifecycle() -> Test
     let claims = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_string(),
-        aud: "korgan".to_string(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 3600,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: session.created_at.timestamp(),
-        amr: vec!["pwd".to_string()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let access_token = ctx.token_signer.sign_access_token(&claims)?;
 
@@ -1131,13 +1131,13 @@ async fn test_superadmin_role_can_access_admin_api_endpoints() -> TestResult {
     let claims = AccessTokenClaims {
         sub: superadmin_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_string(),
-        aud: "korgan".to_string(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 3600,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: superadmin_session.created_at.timestamp(),
-        amr: vec!["pwd".to_string()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let access_token = ctx.token_signer.sign_access_token(&claims)?;
 

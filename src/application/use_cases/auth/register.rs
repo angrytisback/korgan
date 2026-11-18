@@ -18,7 +18,7 @@ use crate::ports::repositories::UserRepository;
 use crate::ports::services::{HibpClient, PasswordHasher};
 
 /// Default lifetime for email verification tokens (24 hours).
-pub const DEFAULT_EMAIL_VERIFICATION_TTL: Duration = Duration::from_secs(24 * 3600);
+pub const DEFAULT_EMAIL_VERIFICATION_TTL: Duration = Duration::from_hours(24);
 
 /// Coordinates user account registration.
 #[derive(Clone)]
@@ -35,7 +35,7 @@ impl std::fmt::Debug for RegisterUserUseCase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegisterUserUseCase")
             .field("verification_ttl", &self.verification_ttl)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -137,7 +137,7 @@ impl RegisterUserUseCase {
 
         Ok(RegisterResult {
             user_id: user.id,
-            email: user.email.to_string(),
+            email: user.email.into_inner(),
             status: user.status,
             verification_required: true,
         })

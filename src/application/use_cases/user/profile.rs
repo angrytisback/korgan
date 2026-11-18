@@ -44,8 +44,10 @@ impl GetProfileUseCase {
 
         Ok(UserProfileResult {
             id: user.id,
-            email: user.email.to_string(),
-            username: user.username.map(|u| u.into_inner()),
+            email: user.email.into_inner(),
+            username: user
+                .username
+                .map(crate::domain::value_objects::Username::into_inner),
             status: user.status,
             mfa_enabled: user.mfa_enabled,
             created_at: user.created_at,
@@ -113,8 +115,10 @@ impl UpdateProfileUseCase {
 
         Ok(UserProfileResult {
             id: fresh_user.id,
-            email: fresh_user.email.to_string(),
-            username: fresh_user.username.map(|u| u.into_inner()),
+            email: fresh_user.email.into_inner(),
+            username: fresh_user
+                .username
+                .map(crate::domain::value_objects::Username::into_inner),
             status: fresh_user.status,
             mfa_enabled: fresh_user.mfa_enabled,
             created_at: fresh_user.created_at,

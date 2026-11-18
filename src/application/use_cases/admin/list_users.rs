@@ -53,8 +53,10 @@ impl ListUsersUseCase {
             .into_iter()
             .map(|u| AdminUserItem {
                 id: u.id,
-                email: u.email.to_string(),
-                username: u.username.map(|un| un.into_inner()),
+                email: u.email.into_inner(),
+                username: u
+                    .username
+                    .map(crate::domain::value_objects::Username::into_inner),
                 role: u.role,
                 status: u.status,
                 email_verified: u.email_verified_at.is_some(),

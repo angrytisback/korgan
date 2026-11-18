@@ -10,6 +10,7 @@ pub mod token_utils;
 pub mod user;
 
 pub use cancellation::shielded;
+pub use token_utils::{SESSION_BLACKLIST_TTL, blacklist_sessions};
 
 pub use admin::{
     AuditVerificationResult, BanUserUseCase, BootstrapSuperadminUseCase, BrokenAuditLink,

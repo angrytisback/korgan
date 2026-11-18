@@ -808,13 +808,13 @@ impl TokenSigner for MockTokenSigner {
         Ok(AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "mock".to_owned(),
-            aud: "mock".to_owned(),
+            iss: std::borrow::Cow::Borrowed("mock"),
+            aud: std::borrow::Cow::Borrowed("mock"),
             exp: Utc::now().timestamp() + 3600,
             iat: Utc::now().timestamp(),
             jti: "mock-jti".to_owned(),
             auth_time: Utc::now().timestamp(),
-            amr: vec!["pwd".to_string()],
+            amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
         })
     }
 
@@ -2593,7 +2593,7 @@ async fn test_expired_refresh_token_does_not_trigger_token_family_revocation() -
         revoked_at: None,
         revoke_reason: None,
         created_at: Utc::now(),
-        amr: vec!["pwd".to_string()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let sibling_id = sibling_session.id;
     session_repo.create(&sibling_session).await?;
@@ -3944,5 +3944,442 @@ async fn test_mfa_enable_atomic_synchronization() -> TestResult {
     let post_disable_mfa = user_repo.find_mfa(&user_id).await?;
     assert!(post_disable_mfa.is_none());
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// M2 Iteration 2: Fault-Injection Regression Tests for mfa/enable.rs & setup.rs
+// ---------------------------------------------------------------------------
+
+#[derive(Default, Debug)]
+struct FailingTotpService {
+    fail_verify: bool,
+}
+
+impl TotpService for FailingTotpService {
+    fn generate_secret(&self) -> Result<Vec<u8>, PortError> {
+        Ok(vec![
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        ])
+    }
+
+    fn generate_qr_code_svg(
+        &self,
+        _email: &EmailAddress,
+        _secret: &[u8],
+        _issuer: &str,
+    ) -> Result<String, PortError> {
+        Ok("<svg>mock_qr</svg>".to_owned())
+    }
+
+    fn verify_code(
+        &self,
+        _secret: &[u8],
+        code: &str,
+        _now_epoch_secs: u64,
+    ) -> Result<bool, PortError> {
+        if self.fail_verify {
+            return Err(PortError::crypto("injected totp verify_code failure"));
+        }
+        Ok(code == "123456")
+    }
+}
+
+#[derive(Default, Debug)]
+struct FailingSecretCipher {
+    fail_encrypt_with_aad: bool,
+    encrypt_calls: AtomicUsize,
+}
+
+impl SecretCipher for FailingSecretCipher {
+    fn encrypt(&self, plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>), PortError> {
+        Ok((plaintext.to_vec(), vec![0u8; 12]))
+    }
+
+    fn decrypt(&self, ciphertext: &[u8], _nonce: &[u8]) -> Result<DecryptedSecret, PortError> {
+        Ok(DecryptedSecret::new(ciphertext.to_vec()))
+    }
+
+    fn encrypt_with_aad(
+        &self,
+        plaintext: &[u8],
+        _aad: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), PortError> {
+        self.encrypt_calls.fetch_add(1, Ordering::Relaxed);
+        if self.fail_encrypt_with_aad {
+            return Err(PortError::crypto("injected encrypt_with_aad failure"));
+        }
+        Ok((plaintext.to_vec(), vec![0u8; 12]))
+    }
+
+    fn decrypt_with_aad(
+        &self,
+        ciphertext: &[u8],
+        _nonce: &[u8],
+        _aad: &[u8],
+    ) -> Result<DecryptedSecret, PortError> {
+        Ok(DecryptedSecret::new(ciphertext.to_vec()))
+    }
+}
+
+#[derive(Default, Debug)]
+struct FaultyTokenStore {
+    inner: MockTokenStore,
+    fail_set_token: bool,
+    fail_delete_token: bool,
+    set_token_calls: AtomicUsize,
+    set_tokens_batch_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl TokenStore for FaultyTokenStore {
+    async fn set_token(&self, key: &str, token_hash: &str, ttl: Duration) -> Result<(), PortError> {
+        self.set_token_calls.fetch_add(1, Ordering::Relaxed);
+        if self.fail_set_token {
+            return Err(PortError::cache("injected set_token failure"));
+        }
+        self.inner.set_token(key, token_hash, ttl).await
+    }
+
+    async fn get_token(&self, key: &str) -> Result<Option<String>, PortError> {
+        self.inner.get_token(key).await
+    }
+
+    async fn delete_token(&self, key: &str) -> Result<(), PortError> {
+        if self.fail_delete_token {
+            return Err(PortError::cache("injected delete_token failure"));
+        }
+        self.inner.delete_token(key).await
+    }
+
+    async fn get_and_delete(&self, key: &str) -> Result<Option<String>, PortError> {
+        self.inner.get_and_delete(key).await
+    }
+
+    async fn consume_token(&self, key: &str, expected_token_hash: &str) -> Result<bool, PortError> {
+        self.inner.consume_token(key, expected_token_hash).await
+    }
+
+    async fn set_if_not_exists(
+        &self,
+        key: &str,
+        value: &str,
+        ttl: Duration,
+    ) -> Result<bool, PortError> {
+        self.inner.set_if_not_exists(key, value, ttl).await
+    }
+
+    async fn set_tokens_batch(&self, items: &[(&str, &str, Duration)]) -> Result<(), PortError> {
+        self.set_tokens_batch_calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.set_tokens_batch(items).await
+    }
+}
+
+#[tokio::test]
+async fn test_enable_totp_verify_code_error_propagates_without_side_effects() -> TestResult {
+    let user_repo = Arc::new(MockUserRepository::default());
+    let password_hasher = Argon2PasswordHasher::new(1024, 1, 1)?;
+    let totp_service = Arc::new(FailingTotpService { fail_verify: true });
+    let secret_cipher = Arc::new(FailingSecretCipher::default());
+    let token_store = Arc::new(FaultyTokenStore::default());
+    let (event_bus, mut event_rx) = EventBus::new(10);
+
+    let raw_pw = RawPassword::new("SecretPass123!")?;
+    let hash = password_hasher.hash_password(&raw_pw).await?;
+    let user = User::new(EmailAddress::parse("verify_err@example.com")?, None, hash);
+    let user_id = user.id;
+    user_repo.create(&user).await?;
+
+    let setup_uc = SetupTotpUseCase::new(
+        user_repo.clone(),
+        totp_service.clone(),
+        token_store.clone(),
+        "Korgan".to_owned(),
+        Duration::from_mins(15),
+    );
+    setup_uc
+        .execute(SetupTotpCommand {
+            user_id,
+            request_id: RequestId::new(),
+        })
+        .await?;
+
+    let enable_uc = EnableTotpUseCase::new(
+        user_repo.clone(),
+        totp_service,
+        secret_cipher.clone(),
+        token_store.clone(),
+        event_bus,
+    );
+    let err = enable_uc
+        .execute(EnableTotpCommand {
+            user_id,
+            code: "123456".to_owned(),
+            ip_address: None,
+            user_agent: None,
+            request_id: RequestId::new(),
+        })
+        .await;
+
+    assert!(
+        matches!(err, Err(AppError::Internal { .. })),
+        "expected AppError::Internal on verify_code error, got {err:?}"
+    );
+    assert_eq!(secret_cipher.encrypt_calls.load(Ordering::Relaxed), 0);
+    assert!(
+        token_store
+            .get_token(&format!("pending_totp:{user_id}"))
+            .await?
+            .is_some(),
+        "pending token should remain when verify_code fails"
+    );
+    let stored_user = user_repo
+        .find_by_id(&user_id)
+        .await?
+        .ok_or("user missing")?;
+    assert!(!stored_user.mfa_enabled);
+    assert!(user_repo.find_mfa(&user_id).await?.is_none());
+    assert!(event_rx.try_recv().is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_enable_totp_delete_token_error_propagates_without_side_effects() -> TestResult {
+    let user_repo = Arc::new(MockUserRepository::default());
+    let password_hasher = Argon2PasswordHasher::new(1024, 1, 1)?;
+    let totp_service = Arc::new(FailingTotpService { fail_verify: false });
+    let secret_cipher = Arc::new(FailingSecretCipher::default());
+    let token_store = Arc::new(FaultyTokenStore {
+        fail_delete_token: true,
+        ..Default::default()
+    });
+    let (event_bus, mut event_rx) = EventBus::new(10);
+
+    let raw_pw = RawPassword::new("SecretPass123!")?;
+    let hash = password_hasher.hash_password(&raw_pw).await?;
+    let user = User::new(EmailAddress::parse("delete_err@example.com")?, None, hash);
+    let user_id = user.id;
+    user_repo.create(&user).await?;
+
+    let setup_uc = SetupTotpUseCase::new(
+        user_repo.clone(),
+        totp_service.clone(),
+        token_store.clone(),
+        "Korgan".to_owned(),
+        Duration::from_mins(15),
+    );
+    setup_uc
+        .execute(SetupTotpCommand {
+            user_id,
+            request_id: RequestId::new(),
+        })
+        .await?;
+
+    let enable_uc = EnableTotpUseCase::new(
+        user_repo.clone(),
+        totp_service,
+        secret_cipher.clone(),
+        token_store,
+        event_bus,
+    );
+    let err = enable_uc
+        .execute(EnableTotpCommand {
+            user_id,
+            code: "123456".to_owned(),
+            ip_address: None,
+            user_agent: None,
+            request_id: RequestId::new(),
+        })
+        .await;
+
+    assert!(
+        matches!(err, Err(AppError::Internal { .. })),
+        "expected AppError::Internal on delete_token error, got {err:?}"
+    );
+    assert_eq!(secret_cipher.encrypt_calls.load(Ordering::Relaxed), 0);
+    let stored_user = user_repo
+        .find_by_id(&user_id)
+        .await?
+        .ok_or("user missing")?;
+    assert!(!stored_user.mfa_enabled);
+    assert!(user_repo.find_mfa(&user_id).await?.is_none());
+    assert!(event_rx.try_recv().is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_enable_totp_encrypt_with_aad_error_propagates_without_side_effects() -> TestResult {
+    let user_repo = Arc::new(MockUserRepository::default());
+    let password_hasher = Argon2PasswordHasher::new(1024, 1, 1)?;
+    let totp_service = Arc::new(FailingTotpService { fail_verify: false });
+    let secret_cipher = Arc::new(FailingSecretCipher {
+        fail_encrypt_with_aad: true,
+        encrypt_calls: AtomicUsize::new(0),
+    });
+    let token_store = Arc::new(FaultyTokenStore::default());
+    let (event_bus, mut event_rx) = EventBus::new(10);
+
+    let raw_pw = RawPassword::new("SecretPass123!")?;
+    let hash = password_hasher.hash_password(&raw_pw).await?;
+    let user = User::new(EmailAddress::parse("cipher_err@example.com")?, None, hash);
+    let user_id = user.id;
+    user_repo.create(&user).await?;
+
+    let setup_uc = SetupTotpUseCase::new(
+        user_repo.clone(),
+        totp_service.clone(),
+        token_store.clone(),
+        "Korgan".to_owned(),
+        Duration::from_mins(15),
+    );
+    setup_uc
+        .execute(SetupTotpCommand {
+            user_id,
+            request_id: RequestId::new(),
+        })
+        .await?;
+
+    let enable_uc = EnableTotpUseCase::new(
+        user_repo.clone(),
+        totp_service,
+        secret_cipher.clone(),
+        token_store.clone(),
+        event_bus,
+    );
+    let err = enable_uc
+        .execute(EnableTotpCommand {
+            user_id,
+            code: "123456".to_owned(),
+            ip_address: None,
+            user_agent: None,
+            request_id: RequestId::new(),
+        })
+        .await;
+
+    assert!(
+        matches!(err, Err(AppError::Internal { .. })),
+        "expected AppError::Internal on encrypt_with_aad error, got {err:?}"
+    );
+    assert_eq!(secret_cipher.encrypt_calls.load(Ordering::Relaxed), 1);
+    assert!(
+        token_store
+            .get_token(&format!("pending_totp:{user_id}"))
+            .await?
+            .is_none(),
+        "pending token was consumed before encrypt_with_aad"
+    );
+    let stored_user = user_repo
+        .find_by_id(&user_id)
+        .await?
+        .ok_or("user missing")?;
+    assert!(!stored_user.mfa_enabled);
+    assert!(user_repo.find_mfa(&user_id).await?.is_none());
+    assert!(event_rx.try_recv().is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_setup_totp_set_token_error_propagates() -> TestResult {
+    let user_repo = Arc::new(MockUserRepository::default());
+    let password_hasher = Argon2PasswordHasher::new(1024, 1, 1)?;
+    let totp_service = Arc::new(FailingTotpService::default());
+    let token_store = Arc::new(FaultyTokenStore {
+        fail_set_token: true,
+        ..Default::default()
+    });
+
+    let raw_pw = RawPassword::new("SecretPass123!")?;
+    let hash = password_hasher.hash_password(&raw_pw).await?;
+    let user = User::new(EmailAddress::parse("setup_err@example.com")?, None, hash);
+    let user_id = user.id;
+    user_repo.create(&user).await?;
+
+    let setup_uc = SetupTotpUseCase::new(
+        user_repo,
+        totp_service,
+        token_store,
+        "Korgan".to_owned(),
+        Duration::from_mins(15),
+    );
+    let err = setup_uc
+        .execute(SetupTotpCommand {
+            user_id,
+            request_id: RequestId::new(),
+        })
+        .await;
+
+    assert!(
+        matches!(err, Err(AppError::Internal { .. })),
+        "expected AppError::Internal on set_token error, got {err:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_refresh_single_session_replay_uses_single_blacklist_fast_path() -> TestResult {
+    let session_repo = Arc::new(MockSessionRepository::default());
+    let user_repo = Arc::new(MockUserRepository::default());
+    let token_signer = Arc::new(MockTokenSigner);
+    let token_store = Arc::new(FaultyTokenStore::default());
+    let (event_bus, _event_rx) = EventBus::new(16);
+
+    let hasher = Argon2PasswordHasher::new(1024, 1, 1)?;
+    let dummy_hash = hasher
+        .hash_password(&RawPassword::new("DummyPassword123!")?)
+        .await?;
+    let mut user = User::new(
+        EmailAddress::parse("single_replay@example.com")?,
+        None,
+        dummy_hash,
+    );
+    user.status = korgan::domain::entities::AccountStatus::Active;
+    user_repo.create(&user).await?;
+
+    let raw_token = "single_session_replay_token";
+    let mut session = Session::new(
+        user.id,
+        token_utils::hash_token(raw_token),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        None,
+        None,
+        chrono::Duration::days(7),
+    );
+    session.is_replaced = true;
+    session.last_active_at = Utc::now() - chrono::Duration::seconds(30);
+    session_repo.create(&session).await?;
+
+    let use_case = RefreshSessionUseCase::new(
+        session_repo,
+        user_repo,
+        token_signer,
+        token_store.clone(),
+        event_bus,
+        Duration::from_mins(15),
+        Duration::from_hours(24),
+        "https://api.iam.dev".to_owned(),
+        "api".to_owned(),
+    );
+
+    let res = use_case
+        .execute(RefreshTokenCommand {
+            refresh_token: raw_token.to_owned(),
+            ip_address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            user_agent: None,
+            request_id: RequestId::new(),
+        })
+        .await;
+
+    assert!(matches!(res, Err(AppError::TokenReuseDetected)));
+    assert_eq!(token_store.set_token_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        token_store.set_tokens_batch_calls.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        token_store
+            .get_token(&format!("blacklist:session:{}", session.id))
+            .await?,
+        Some("revoked".to_owned())
+    );
     Ok(())
 }

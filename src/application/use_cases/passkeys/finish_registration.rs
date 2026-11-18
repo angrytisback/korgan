@@ -76,9 +76,13 @@ impl FinishPasskeyRegistrationUseCase {
         let reg_state: PasskeyRegistration =
             serde_json::from_str(&state_json).map_err(|_| DomainError::ChallengeExpired)?;
 
-        let verified_passkey = self
-            .webauthn_service
-            .finish_registration(&cmd.credential, &reg_state)?;
+        let webauthn = self.webauthn_service.clone();
+        let credential = cmd.credential;
+        let verified_passkey = tokio::task::spawn_blocking(move || {
+            webauthn.finish_registration(&credential, &reg_state)
+        })
+        .await
+        .map_err(|e| AppError::internal("passkey registration verification task failed", e))??;
 
         let credential_id = verified_passkey.cred_id().to_vec();
         let passkey_json = serde_json::to_value(&verified_passkey)

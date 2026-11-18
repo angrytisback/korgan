@@ -6,6 +6,7 @@ use validator::Validate;
 
 use crate::application::dto::ChangePasswordCommand;
 use crate::application::error::AppError;
+use crate::application::use_cases::token_utils::{SESSION_BLACKLIST_TTL, blacklist_sessions};
 use crate::application::workers::EventBus;
 use crate::domain::entities::audit_events;
 use crate::domain::entities::{AuditEventStatus, AuditLog};
@@ -31,7 +32,7 @@ impl std::fmt::Debug for ChangePasswordUseCase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChangePasswordUseCase")
             .field("history_depth", &self.history_depth)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -75,19 +76,16 @@ impl ChangePasswordUseCase {
             .ok_or(AppError::Unauthenticated)?;
 
         let raw_current = RawPassword::new(&cmd.current_password)?;
-        let is_valid = match &user.password_hash {
-            Some(hash) => {
-                self.password_hasher
-                    .verify_password(&raw_current, hash)
-                    .await?
-            }
-            None => {
-                let _ = self
-                    .password_hasher
-                    .verify_against_dummy_hash(&raw_current)
-                    .await;
-                false
-            }
+        let is_valid = if let Some(hash) = &user.password_hash {
+            self.password_hasher
+                .verify_password(&raw_current, hash)
+                .await?
+        } else {
+            let _ = self
+                .password_hasher
+                .verify_against_dummy_hash(&raw_current)
+                .await;
+            false
         };
 
         if !is_valid {
@@ -117,7 +115,7 @@ impl ChangePasswordUseCase {
 
         let history = self
             .user_repo
-            .get_password_history(&user.id, self.history_depth as u32)
+            .get_password_history(&user.id, u32::from(self.history_depth))
             .await?;
 
         for hist_hash in history {
@@ -171,30 +169,11 @@ impl ChangePasswordUseCase {
             )
             .await?;
 
-        let token_store = self.token_store.clone();
-        let entries: Vec<(String, &'static str, std::time::Duration)> = revoked_ids
-            .into_iter()
-            .map(|sid| {
-                (
-                    format!("blacklist:session:{sid}"),
-                    "revoked",
-                    std::time::Duration::from_secs(30 * 86400),
-                )
-            })
-            .collect();
-
-        crate::application::use_cases::shielded(move || {
-            let token_store = token_store.clone();
-            let entries = entries.clone();
-            async move {
-                let borrowed: Vec<(&str, &str, std::time::Duration)> = entries
-                    .iter()
-                    .map(|(k, v, ttl)| (k.as_str(), *v, *ttl))
-                    .collect();
-                token_store.set_tokens_batch(&borrowed).await?;
-                Ok(())
-            }
-        })
+        blacklist_sessions(
+            self.token_store.clone(),
+            &revoked_ids,
+            SESSION_BLACKLIST_TTL,
+        )
         .await?;
 
         Ok(())

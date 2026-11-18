@@ -1,4 +1,4 @@
-//! Data transfer objects for OAuth2 social authentication.
+//! Data transfer objects for `OAuth2` social authentication.
 
 use std::net::IpAddr;
 
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::entities::OAuthProvider;
 use crate::domain::value_objects::RequestId;
 
-/// Result returned when generating an external OAuth2 authorization URL.
+/// Result returned when generating an external `OAuth2` authorization URL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthUrlResult {
     /// Target provider authorization endpoint with query parameters.
@@ -16,7 +16,7 @@ pub struct OAuthUrlResult {
     pub state: String,
 }
 
-/// Command to process an external OAuth2 identity provider callback.
+/// Command to process an external `OAuth2` identity provider callback.
 #[derive(Debug, Clone)]
 pub struct OAuthCallbackCommand {
     /// Target identity provider.

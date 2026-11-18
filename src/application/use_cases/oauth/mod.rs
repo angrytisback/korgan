@@ -1,4 +1,4 @@
-//! OAuth2 external authentication use cases.
+//! `OAuth2` external authentication use cases.
 
 pub mod callback;
 pub mod generate_url;

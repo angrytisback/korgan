@@ -1,13 +1,17 @@
-//! Processes OAuth2 provider callback, links or creates user, and issues sessions.
+//! Processes `OAuth2` provider callback, links or creates user, and issues sessions.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use smallvec::smallvec;
 
 use crate::application::dto::{AuthTokensResult, OAuthCallbackCommand};
 use crate::application::error::AppError;
-use crate::application::use_cases::token_utils::generate_opaque_token;
+use crate::application::use_cases::token_utils::{
+    SESSION_BLACKLIST_TTL, blacklist_sessions, generate_opaque_token,
+};
 use crate::application::workers::EventBus;
 use crate::domain::entities::{
     AccountStatus, AuditEventStatus, AuditLog, OAuthAccount, OAuthProvider, Session, User,
@@ -15,9 +19,9 @@ use crate::domain::entities::{
 };
 use crate::ports::cache::TokenStore;
 use crate::ports::repositories::{OAuthAccountRepository, SessionRepository, UserRepository};
-use crate::ports::services::{AccessTokenClaims, OAuthProviderPort, TokenSigner};
+use crate::ports::services::{AccessTokenClaims, OAuthProfile, OAuthProviderPort, TokenSigner};
 
-/// Processes an external OAuth2 callback, establishing user authentication.
+/// Processes an external `OAuth2` callback, establishing user authentication.
 #[derive(Clone)]
 pub struct OAuthCallbackUseCase {
     user_repo: Arc<dyn UserRepository>,
@@ -30,8 +34,8 @@ pub struct OAuthCallbackUseCase {
     event_bus: EventBus,
     access_token_ttl: Duration,
     refresh_token_ttl: Duration,
-    jwt_issuer: String,
-    jwt_audience: String,
+    jwt_issuer: Cow<'static, str>,
+    jwt_audience: Cow<'static, str>,
 }
 
 impl std::fmt::Debug for OAuthCallbackUseCase {
@@ -58,8 +62,8 @@ impl OAuthCallbackUseCase {
         event_bus: EventBus,
         access_token_ttl: Duration,
         refresh_token_ttl: Duration,
-        jwt_issuer: String,
-        jwt_audience: String,
+        jwt_issuer: impl Into<Cow<'static, str>>,
+        jwt_audience: impl Into<Cow<'static, str>>,
     ) -> Self {
         Self {
             user_repo,
@@ -72,8 +76,8 @@ impl OAuthCallbackUseCase {
             event_bus,
             access_token_ttl,
             refresh_token_ttl,
-            jwt_issuer,
-            jwt_audience,
+            jwt_issuer: jwt_issuer.into(),
+            jwt_audience: jwt_audience.into(),
         }
     }
 
@@ -100,6 +104,19 @@ impl OAuthCallbackUseCase {
         &self,
         cmd: OAuthCallbackCommand,
     ) -> Result<AuthTokensResult, AppError> {
+        let profile = self.validate_state_and_exchange(&cmd).await?;
+        let now = Utc::now();
+        let user = self
+            .resolve_or_link_user(cmd.provider, profile, now)
+            .await?;
+
+        self.issue_oauth_session_tokens(user.id, cmd, now).await
+    }
+
+    async fn validate_state_and_exchange(
+        &self,
+        cmd: &OAuthCallbackCommand,
+    ) -> Result<OAuthProfile, AppError> {
         // 1. Validate anti-CSRF state parameter and browser cookie binding (RFC 6749 Section 10.12)
         let cookie_matches = cmd.cookie_state.as_deref().is_some_and(|c| c == cmd.state);
 
@@ -113,148 +130,142 @@ impl OAuthCallbackUseCase {
                 .record_audit(AuditLog::new(
                     None,
                     Some(cmd.ip_address),
-                    cmd.user_agent,
+                    cmd.user_agent.clone(),
                     cmd.request_id,
                     audit_events::LOGIN_FAILED,
                     AuditEventStatus::Blocked,
                     serde_json::json!({
-                        "reason": if !cookie_matches { "oauth_state_cookie_mismatch" } else { "invalid_or_expired_oauth_state" },
+                        "reason": if cookie_matches { "invalid_or_expired_oauth_state" } else { "oauth_state_cookie_mismatch" },
                         "provider": cmd.provider.as_str()
                     }),
-                )).await;
+                ))
+                .await;
 
             return Err(AppError::Forbidden);
         }
 
         // 2. Exchange authorization code for external profile
-        let profile = match cmd.provider {
+        match cmd.provider {
             OAuthProvider::Google => self.google_provider.exchange_code(&cmd.code).await,
             OAuthProvider::GitHub => self.github_provider.exchange_code(&cmd.code).await,
         }
         .map_err(|e| match e {
             crate::ports::PortError::Cryptography(_) => AppError::Forbidden,
             other => AppError::from(other),
-        })?;
+        })
+    }
 
-        let now = Utc::now();
-
-        // 3. Link or Create logic
+    async fn resolve_or_link_user(
+        &self,
+        provider: OAuthProvider,
+        profile: OAuthProfile,
+        now: DateTime<Utc>,
+    ) -> Result<User, AppError> {
         let maybe_account = self
             .oauth_repo
-            .find_by_provider_and_id(cmd.provider, &profile.provider_user_id)
+            .find_by_provider_and_id(provider, &profile.provider_user_id)
             .await?;
 
-        let user = match maybe_account {
-            Some(account) => {
-                let user = self
-                    .user_repo
-                    .find_by_id(&account.user_id)
-                    .await?
-                    .ok_or_else(|| {
-                        AppError::internal(
-                            "linked user record missing",
-                            "database consistency violation",
-                        )
-                    })?;
+        if let Some(account) = maybe_account {
+            let user = self
+                .user_repo
+                .find_by_id(&account.user_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::internal(
+                        "linked user record missing",
+                        "database consistency violation",
+                    )
+                })?;
 
-                user.can_login(now)?;
-                user
-            }
-            None => {
-                // Check if user already exists with the same verified email
-                let maybe_user = self.user_repo.find_by_email(&profile.email).await?;
+            user.can_login(now)?;
+            return Ok(user);
+        }
 
-                let (user, is_new_user) = match maybe_user {
-                    Some(mut existing_user) => {
-                        if existing_user.status == AccountStatus::Unverified {
-                            // R1.3 Pre-account takeover defense:
-                            // 1. Clear password hash so attacker cannot authenticate with password
-                            existing_user.password_hash = None;
-                            // 2. Reset failed attempts and lockout trap set by attacker
-                            existing_user.failed_login_attempts = 0;
-                            existing_user.locked_until = None;
-                            // 3. Verify email and activate account
-                            existing_user.verify_email(now);
-                            // 4. Validate login eligibility
-                            existing_user.can_login(now)?;
-                            // 5. Persist changes to database (password_hash = NULL in SQL)
-                            self.user_repo.update(&existing_user).await?;
-                            // 6. Invalidate all existing sessions across all devices
-                            let revoked_ids = self
-                                .session_repo
-                                .revoke_all_user_sessions(
-                                    &existing_user.id,
-                                    None,
-                                    "oauth_pre_account_takeover_defense",
-                                )
-                                .await?;
+        // Check if user already exists with the same verified email
+        let maybe_user = self.user_repo.find_by_email(&profile.email).await?;
 
-                            // 7. Sync revoked sessions to distributed TokenStore blacklist
-                            if !revoked_ids.is_empty() {
-                                let token_store = self.token_store.clone();
-                                let entries: Vec<(String, &'static str, Duration)> = revoked_ids
-                                    .into_iter()
-                                    .map(|sid| {
-                                        (
-                                            format!("blacklist:session:{sid}"),
-                                            "revoked",
-                                            Duration::from_secs(30 * 86400),
-                                        )
-                                    })
-                                    .collect();
-
-                                crate::application::use_cases::shielded(move || {
-                                    let token_store = token_store.clone();
-                                    let entries = entries.clone();
-                                    async move {
-                                        let borrowed: Vec<(&str, &str, Duration)> = entries
-                                            .iter()
-                                            .map(|(k, v, ttl)| (k.as_str(), *v, *ttl))
-                                            .collect();
-                                        token_store.set_tokens_batch(&borrowed).await?;
-                                        Ok(())
-                                    }
-                                })
-                                .await?;
-                            }
-                        } else {
-                            existing_user.can_login(now)?;
-                        }
-                        (existing_user, false)
-                    }
-                    None => {
-                        let mut new_user = User::new(profile.email.clone(), None, None);
-                        new_user.status = AccountStatus::Active;
-                        new_user.email_verified_at = Some(now);
-                        (new_user, true)
-                    }
-                };
-
-                let new_account =
-                    OAuthAccount::new(user.id, cmd.provider, profile.provider_user_id);
-                self.oauth_repo
-                    .link_oauth_account(if is_new_user { Some(&user) } else { None }, &new_account)
-                    .await?;
-                user
-            }
+        let (user, is_new_user) = if let Some(existing_user) = maybe_user {
+            let resolved = if existing_user.status == AccountStatus::Unverified {
+                self.defend_pre_account_takeover(existing_user, now).await?
+            } else {
+                existing_user.can_login(now)?;
+                existing_user
+            };
+            (resolved, false)
+        } else {
+            let mut new_user = User::new(profile.email, None, None);
+            new_user.status = AccountStatus::Active;
+            new_user.email_verified_at = Some(now);
+            (new_user, true)
         };
 
-        // 4. Create Session & Tokens
+        let new_account = OAuthAccount::new(user.id, provider, profile.provider_user_id);
+        self.oauth_repo
+            .link_oauth_account(if is_new_user { Some(&user) } else { None }, &new_account)
+            .await?;
+        Ok(user)
+    }
+
+    async fn defend_pre_account_takeover(
+        &self,
+        mut existing_user: User,
+        now: DateTime<Utc>,
+    ) -> Result<User, AppError> {
+        // R1.3 Pre-account takeover defense:
+        // 1. Clear password hash so attacker cannot authenticate with password
+        existing_user.password_hash = None;
+        // 2. Reset failed attempts and lockout trap set by attacker
+        existing_user.failed_login_attempts = 0;
+        existing_user.locked_until = None;
+        // 3. Verify email and activate account
+        existing_user.verify_email(now);
+        // 4. Validate login eligibility
+        existing_user.can_login(now)?;
+        // 5. Persist changes to database (password_hash = NULL in SQL)
+        self.user_repo.update(&existing_user).await?;
+        // 6. Invalidate all existing sessions across all devices
+        let revoked_ids = self
+            .session_repo
+            .revoke_all_user_sessions(
+                &existing_user.id,
+                None,
+                "oauth_pre_account_takeover_defense",
+            )
+            .await?;
+
+        // 7. Sync revoked sessions to distributed TokenStore blacklist
+        blacklist_sessions(
+            self.token_store.clone(),
+            &revoked_ids,
+            SESSION_BLACKLIST_TTL,
+        )
+        .await?;
+
+        Ok(existing_user)
+    }
+
+    async fn issue_oauth_session_tokens(
+        &self,
+        user_id: crate::domain::value_objects::UserId,
+        cmd: OAuthCallbackCommand,
+        now: DateTime<Utc>,
+    ) -> Result<AuthTokensResult, AppError> {
         let (raw_refresh_token, refresh_token_hash) = generate_opaque_token();
         let chrono_refresh_ttl = chrono::Duration::from_std(self.refresh_token_ttl)
             .map_err(|e| AppError::internal("invalid refresh token ttl configuration", e))?;
 
         let session = Session::new(
-            user.id,
+            user_id,
             refresh_token_hash,
             cmd.ip_address,
             cmd.user_agent.clone(),
             cmd.device_name,
             chrono_refresh_ttl,
         )
-        .with_amr(vec!["oauth".to_string()]);
+        .with_amr(smallvec![Cow::Borrowed("oauth")]);
         let audit = AuditLog::new(
-            Some(user.id),
+            Some(user_id),
             Some(cmd.ip_address),
             cmd.user_agent,
             cmd.request_id,
@@ -283,14 +294,15 @@ impl OAuthCallbackUseCase {
             )
             .await?;
 
-        let expires_in = self.access_token_ttl.as_secs() as i64;
+        let expires_in = i64::try_from(self.access_token_ttl.as_secs()).unwrap_or(i64::MAX);
+        let iat = now.timestamp();
         let claims = AccessTokenClaims {
-            sub: user.id,
+            sub: user_id,
             sid: session.id,
             iss: self.jwt_issuer.clone(),
             aud: self.jwt_audience.clone(),
-            exp: now.timestamp() + expires_in,
-            iat: now.timestamp(),
+            exp: iat + expires_in,
+            iat,
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: session.created_at.timestamp(),
             amr: session.amr.clone(),

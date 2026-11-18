@@ -207,13 +207,13 @@ pub struct RegisterResult {
 /// Token bundle issued upon successful authentication or rotation.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthTokensResult {
-    /// RFC 9068 EdDSA Access Token JWT.
+    /// RFC 9068 `EdDSA` Access Token JWT.
     pub access_token: String,
 
-    /// High-entropy Base64URL opaque refresh token.
+    /// High-entropy `Base64URL` opaque refresh token.
     pub refresh_token: String,
 
-    /// OAuth2 token type, always "Bearer".
+    /// `OAuth2` token type, always "Bearer".
     pub token_type: &'static str,
 
     /// Access token validity duration in seconds.

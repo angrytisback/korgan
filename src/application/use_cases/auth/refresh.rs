@@ -1,14 +1,18 @@
 //! Refresh token session rotation use case implementation.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use smallvec::smallvec;
 use validator::Validate;
 
 use crate::application::dto::{AuthTokensResult, RefreshTokenCommand};
 use crate::application::error::AppError;
-use crate::application::use_cases::token_utils::{generate_opaque_token, hash_token};
+use crate::application::use_cases::token_utils::{
+    blacklist_sessions, generate_opaque_token, hash_token,
+};
 use crate::application::workers::EventBus;
 use crate::domain::entities::audit_events;
 use crate::domain::entities::{AuditEventStatus, AuditLog, Session};
@@ -27,8 +31,8 @@ pub struct RefreshSessionUseCase {
     access_token_ttl: Duration,
     refresh_token_ttl: Duration,
     rotation_grace_period: chrono::Duration,
-    jwt_issuer: String,
-    jwt_audience: String,
+    jwt_issuer: Cow<'static, str>,
+    jwt_audience: Cow<'static, str>,
 }
 
 impl std::fmt::Debug for RefreshSessionUseCase {
@@ -37,7 +41,7 @@ impl std::fmt::Debug for RefreshSessionUseCase {
             .field("access_token_ttl", &self.access_token_ttl)
             .field("refresh_token_ttl", &self.refresh_token_ttl)
             .field("rotation_grace_period", &self.rotation_grace_period)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -53,8 +57,8 @@ impl RefreshSessionUseCase {
         event_bus: EventBus,
         access_token_ttl: Duration,
         refresh_token_ttl: Duration,
-        jwt_issuer: String,
-        jwt_audience: String,
+        jwt_issuer: impl Into<Cow<'static, str>>,
+        jwt_audience: impl Into<Cow<'static, str>>,
     ) -> Self {
         Self {
             session_repo,
@@ -65,14 +69,14 @@ impl RefreshSessionUseCase {
             access_token_ttl,
             refresh_token_ttl,
             rotation_grace_period: chrono::Duration::seconds(10),
-            jwt_issuer,
-            jwt_audience,
+            jwt_issuer: jwt_issuer.into(),
+            jwt_audience: jwt_audience.into(),
         }
     }
 
     /// Overrides the default rotation grace period (10 seconds).
     #[must_use]
-    pub fn with_rotation_grace_period(mut self, period: chrono::Duration) -> Self {
+    pub const fn with_rotation_grace_period(mut self, period: chrono::Duration) -> Self {
         self.rotation_grace_period = period;
         self
     }
@@ -97,7 +101,7 @@ impl RefreshSessionUseCase {
 
         // Revoking the token family and its audit entry commit in ONE
         // transaction; the Redis blacklist sync follows.
-        let revoked_ids = self
+        let mut revoked_ids = self
             .event_bus
             .audited(
                 async {
@@ -111,31 +115,14 @@ impl RefreshSessionUseCase {
             )
             .await?;
 
-        let token_store = self.token_store.clone();
-        let refresh_ttl = self.refresh_token_ttl;
-        let mut entries: Vec<(String, &'static str, std::time::Duration)> =
-            Vec::with_capacity(revoked_ids.len() + 1);
-        entries.push((
-            format!("blacklist:session:{}", session.id),
-            "revoked",
-            refresh_ttl,
-        ));
-        for sid in revoked_ids {
-            entries.push((format!("blacklist:session:{sid}"), "revoked", refresh_ttl));
+        if !revoked_ids.contains(&session.id) {
+            revoked_ids.push(session.id);
         }
-
-        crate::application::use_cases::shielded(move || {
-            let token_store = token_store.clone();
-            let entries = entries.clone();
-            async move {
-                let borrowed: Vec<(&str, &str, std::time::Duration)> = entries
-                    .iter()
-                    .map(|(k, v, ttl)| (k.as_str(), *v, *ttl))
-                    .collect();
-                token_store.set_tokens_batch(&borrowed).await?;
-                Ok(())
-            }
-        })
+        blacklist_sessions(
+            self.token_store.clone(),
+            &revoked_ids,
+            self.refresh_token_ttl,
+        )
         .await?;
 
         metrics::counter!("korgan_token_reuse_events_total").increment(1);
@@ -155,9 +142,8 @@ impl RefreshSessionUseCase {
         let now = Utc::now();
 
         // 1. Look up existing session
-        let existing = match self.session_repo.find_by_token_hash(&token_hash).await? {
-            Some(s) => s,
-            None => return Err(AppError::TokenInvalid),
+        let Some(existing) = self.session_repo.find_by_token_hash(&token_hash).await? else {
+            return Err(AppError::TokenInvalid);
         };
 
         if existing.is_revoked() {
@@ -237,16 +223,17 @@ impl RefreshSessionUseCase {
         }
 
         // Issue fresh access token
-        let exp = now.timestamp() + self.access_token_ttl.as_secs() as i64;
+        let access_ttl_secs = i64::try_from(self.access_token_ttl.as_secs()).unwrap_or(i64::MAX);
         let iat = now.timestamp();
+        let exp = iat + access_ttl_secs;
         let jti = uuid::Uuid::now_v7().to_string();
 
         let amr = if !new_session.amr.is_empty() {
             new_session.amr.clone()
         } else if user.mfa_enabled {
-            vec!["pwd".to_string(), "mfa".to_string()]
+            smallvec![Cow::Borrowed("pwd"), Cow::Borrowed("mfa")]
         } else {
-            vec!["pwd".to_string()]
+            smallvec![Cow::Borrowed("pwd")]
         };
 
         let claims = AccessTokenClaims {
@@ -267,7 +254,7 @@ impl RefreshSessionUseCase {
             access_token,
             refresh_token: new_raw_token,
             token_type: "Bearer",
-            expires_in: self.access_token_ttl.as_secs() as i64,
+            expires_in: access_ttl_secs,
             session_id: new_session.id,
         })
     }
