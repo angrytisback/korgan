@@ -121,9 +121,10 @@ impl OAuthCallbackUseCase {
         let cookie_matches = cmd.cookie_state.as_deref().is_some_and(|c| c == cmd.state);
 
         let state_key = format!("oauth:state:{}:{}", cmd.provider.as_str(), cmd.state);
-        // Anti-replay: State token must be consumed unconditionally on any callback attempt
-        let token_consumed = self.token_store.consume_token(&state_key, "valid").await?;
-        let is_valid = cookie_matches && token_consumed;
+        // Anti-replay: the state record (which carries the PKCE code_verifier)
+        // is atomically fetched-and-deleted unconditionally on any callback attempt.
+        let code_verifier = self.token_store.get_and_delete(&state_key).await?;
+        let is_valid = cookie_matches && code_verifier.is_some();
 
         if !is_valid {
             self.event_bus
@@ -144,10 +145,22 @@ impl OAuthCallbackUseCase {
             return Err(AppError::Forbidden);
         }
 
-        // 2. Exchange authorization code for external profile
+        let Some(code_verifier) = code_verifier else {
+            return Err(AppError::Forbidden);
+        };
+
+        // 2. Exchange authorization code (+ PKCE verifier) for external profile
         match cmd.provider {
-            OAuthProvider::Google => self.google_provider.exchange_code(&cmd.code).await,
-            OAuthProvider::GitHub => self.github_provider.exchange_code(&cmd.code).await,
+            OAuthProvider::Google => {
+                self.google_provider
+                    .exchange_code(&cmd.code, &code_verifier)
+                    .await
+            }
+            OAuthProvider::GitHub => {
+                self.github_provider
+                    .exchange_code(&cmd.code, &code_verifier)
+                    .await
+            }
         }
         .map_err(|e| match e {
             crate::ports::PortError::Cryptography(_) => AppError::Forbidden,

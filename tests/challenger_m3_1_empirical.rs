@@ -428,10 +428,14 @@ impl OAuthProviderPort for NoopOAuthProvider {
     fn provider(&self) -> OAuthProvider {
         self.0
     }
-    fn build_authorization_url(&self, _state: &str) -> String {
+    fn build_authorization_url(&self, _state: &str, _code_challenge: &str) -> String {
         "https://example.com".to_owned()
     }
-    async fn exchange_code(&self, _code: &str) -> Result<OAuthProfile, PortError> {
+    async fn exchange_code(
+        &self,
+        _code: &str,
+        _code_verifier: &str,
+    ) -> Result<OAuthProfile, PortError> {
         Err(PortError::external_service("oauth", "noop", None))
     }
 }

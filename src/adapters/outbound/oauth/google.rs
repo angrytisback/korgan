@@ -109,26 +109,33 @@ impl OAuthProviderPort for GoogleOAuthAdapter {
         OAuthProvider::Google
     }
 
-    fn build_authorization_url(&self, state: &str) -> String {
+    fn build_authorization_url(&self, state: &str, code_challenge: &str) -> String {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("client_id", &self.client_id)
             .append_pair("redirect_uri", &self.redirect_uri)
             .append_pair("response_type", "code")
             .append_pair("scope", "openid email profile")
             .append_pair("state", state)
+            .append_pair("code_challenge", code_challenge)
+            .append_pair("code_challenge_method", "S256")
             .append_pair("access_type", "offline")
             .append_pair("prompt", "select_account")
             .finish();
         format!("{}?{query}", self.auth_url)
     }
 
-    async fn exchange_code(&self, code: &str) -> Result<OAuthProfile, PortError> {
+    async fn exchange_code(
+        &self,
+        code: &str,
+        code_verifier: &str,
+    ) -> Result<OAuthProfile, PortError> {
         let params = [
             ("code", code),
             ("client_id", &self.client_id),
             ("client_secret", self.client_secret.expose_secret()),
             ("redirect_uri", &self.redirect_uri),
             ("grant_type", "authorization_code"),
+            ("code_verifier", code_verifier),
         ];
 
         let res = self
@@ -238,7 +245,8 @@ mod tests {
             SecretString::from("secret"),
             "https://app.example.com/cb?a=b&c=d",
         )?;
-        let url = adapter.build_authorization_url("st&ate=evil");
+        let url = adapter.build_authorization_url("st&ate=evil", "chal-lenge_123");
+        assert!(url.contains("code_challenge=chal-lenge_123&code_challenge_method=S256"));
         assert!(url.contains("client_id=client+id%26x%3D1"));
         assert!(url.contains("redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb%3Fa%3Db%26c%3Dd"));
         assert!(url.contains("state=st%26ate%3Devil"));

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::application::dto::OAuthUrlResult;
 use crate::application::error::AppError;
-use crate::application::use_cases::token_utils::generate_opaque_token;
+use crate::application::use_cases::token_utils::{generate_opaque_token, pkce_s256_challenge};
 use crate::domain::entities::OAuthProvider;
 use crate::ports::cache::TokenStore;
 use crate::ports::services::OAuthProviderPort;
@@ -51,15 +51,22 @@ impl GenerateOAuthUrlUseCase {
     /// Returns [`AppError`] if state caching fails.
     pub async fn execute(&self, provider: OAuthProvider) -> Result<OAuthUrlResult, AppError> {
         let (raw_state, _) = generate_opaque_token();
+        // RFC 7636: 256-bit random verifier, kept server-side next to the state.
+        let (code_verifier, _) = generate_opaque_token();
+        let code_challenge = pkce_s256_challenge(&code_verifier);
 
         let state_key = format!("oauth:state:{}:{}", provider.as_str(), raw_state);
         self.token_store
-            .set_token(&state_key, "valid", self.state_ttl)
+            .set_token(&state_key, &code_verifier, self.state_ttl)
             .await?;
 
         let url = match provider {
-            OAuthProvider::Google => self.google_provider.build_authorization_url(&raw_state),
-            OAuthProvider::GitHub => self.github_provider.build_authorization_url(&raw_state),
+            OAuthProvider::Google => self
+                .google_provider
+                .build_authorization_url(&raw_state, &code_challenge),
+            OAuthProvider::GitHub => self
+                .github_provider
+                .build_authorization_url(&raw_state, &code_challenge),
         };
 
         Ok(OAuthUrlResult {

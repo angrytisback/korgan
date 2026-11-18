@@ -10,7 +10,7 @@
 //! 5. Passwordless security: Standard password login on OAuth-only account fails with
 //!    401 Unauthorized via constant-time dummy hash verification.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -807,6 +807,8 @@ struct MockOAuthProvider {
     provider: OAuthProvider,
     auth_base_url: String,
     responses: Mutex<HashMap<String, Result<OAuthProfile, PortError>>>,
+    /// PKCE challenges handed out in authorization URLs.
+    issued_challenges: Mutex<HashSet<String>>,
 }
 
 impl MockOAuthProvider {
@@ -815,6 +817,7 @@ impl MockOAuthProvider {
             provider,
             auth_base_url: auth_base_url.to_owned(),
             responses: Mutex::new(HashMap::new()),
+            issued_challenges: Mutex::new(HashSet::new()),
         }
     }
 
@@ -852,14 +855,32 @@ impl OAuthProviderPort for MockOAuthProvider {
         self.provider
     }
 
-    fn build_authorization_url(&self, state: &str) -> String {
+    fn build_authorization_url(&self, state: &str, code_challenge: &str) -> String {
+        if let Ok(mut issued) = self.issued_challenges.lock() {
+            issued.insert(code_challenge.to_owned());
+        }
         format!(
-            "{}?client_id=test_client&state={}&scope=openid+email",
-            self.auth_base_url, state
+            "{}?client_id=test_client&state={}&scope=openid+email&code_challenge={}&code_challenge_method=S256",
+            self.auth_base_url, state, code_challenge
         )
     }
 
-    async fn exchange_code(&self, code: &str) -> Result<OAuthProfile, PortError> {
+    async fn exchange_code(
+        &self,
+        code: &str,
+        code_verifier: &str,
+    ) -> Result<OAuthProfile, PortError> {
+        // Behave like a real IdP: the verifier must hash to a challenge we issued.
+        let challenge =
+            korgan::application::use_cases::token_utils::pkce_s256_challenge(code_verifier);
+        let known = self
+            .issued_challenges
+            .lock()
+            .map_err(|e| PortError::external_service(self.provider.as_str(), e.to_string(), None))?
+            .contains(&challenge);
+        if !known {
+            return Err(PortError::security("PKCE code_verifier mismatch"));
+        }
         let responses = self.responses.lock().map_err(|e| {
             PortError::external_service(self.provider.as_str(), e.to_string(), None)
         })?;
@@ -1066,7 +1087,17 @@ async fn test_oauth_authorization_url_generation() -> TestResult {
     // Verify state was saved to TokenStore
     let state_key = format!("oauth:state:google:{}", body.state);
     let stored = ctx.token_store.get_token(&state_key).await?;
-    assert_eq!(stored.as_deref(), Some("valid"));
+    // The stored value is the PKCE code_verifier; the URL carries its S256 challenge.
+    let verifier = stored.ok_or("state record missing")?;
+    assert!(
+        verifier.len() >= 43,
+        "RFC 7636 verifier must be >= 43 chars"
+    );
+    assert!(body.url.contains(&format!(
+        "code_challenge={}",
+        korgan::application::use_cases::token_utils::pkce_s256_challenge(&verifier)
+    )));
+    assert!(body.url.contains("code_challenge_method=S256"));
 
     // 2. GitHub OAuth URL Generation
     let req = Request::builder()
@@ -1086,7 +1117,17 @@ async fn test_oauth_authorization_url_generation() -> TestResult {
 
     let state_key = format!("oauth:state:github:{}", body.state);
     let stored = ctx.token_store.get_token(&state_key).await?;
-    assert_eq!(stored.as_deref(), Some("valid"));
+    // The stored value is the PKCE code_verifier; the URL carries its S256 challenge.
+    let verifier = stored.ok_or("state record missing")?;
+    assert!(
+        verifier.len() >= 43,
+        "RFC 7636 verifier must be >= 43 chars"
+    );
+    assert!(body.url.contains(&format!(
+        "code_challenge={}",
+        korgan::application::use_cases::token_utils::pkce_s256_challenge(&verifier)
+    )));
+    assert!(body.url.contains("code_challenge_method=S256"));
 
     // 3. Unsupported Provider returns 422 Unprocessable Entity
     let req = Request::builder()
@@ -1732,7 +1773,10 @@ async fn test_oauth_google_rejects_unverified_email() -> TestResult {
         format!("http://127.0.0.1:{port}/userinfo_unverified"),
     )?;
 
-    let err1 = match adapter_unverified.exchange_code("code_unverified").await {
+    let err1 = match adapter_unverified
+        .exchange_code("code_unverified", "test-verifier")
+        .await
+    {
         Err(e) => e,
         Ok(_) => {
             return Err(
@@ -1755,7 +1799,10 @@ async fn test_oauth_google_rejects_unverified_email() -> TestResult {
         format!("http://127.0.0.1:{port}/userinfo_missing_verified"),
     )?;
 
-    let err2 = match adapter_missing.exchange_code("code_missing").await {
+    let err2 = match adapter_missing
+        .exchange_code("code_missing", "test-verifier")
+        .await
+    {
         Err(e) => e,
         Ok(_) => {
             return Err(
@@ -1881,7 +1928,10 @@ async fn test_oauth_github_ignores_public_bio_email() -> TestResult {
         format!("http://127.0.0.1:{port}/user/emails_unverified"),
     )?;
 
-    let err = match adapter_unverified.exchange_code("code_unverified").await {
+    let err = match adapter_unverified
+        .exchange_code("code_unverified", "test-verifier")
+        .await
+    {
         Err(e) => e,
         Ok(_) => {
             return Err(
@@ -1909,7 +1959,9 @@ async fn test_oauth_github_ignores_public_bio_email() -> TestResult {
         format!("http://127.0.0.1:{port}/user/emails_verified"),
     )?;
 
-    let profile = adapter_verified.exchange_code("code_verified").await?;
+    let profile = adapter_verified
+        .exchange_code("code_verified", "test-verifier")
+        .await?;
 
     // Bio email was strictly ignored
     assert_ne!(
@@ -1977,10 +2029,7 @@ async fn test_oauth_state_consumed_unconditionally_on_cookie_mismatch() -> TestR
     let url_resp: OAuthUrlResponse = json_body(res_url).await?;
 
     let state_key = format!("oauth:state:google:{}", url_resp.state);
-    assert_eq!(
-        ctx.token_store.get_token(&state_key).await?.as_deref(),
-        Some("valid")
-    );
+    assert!(ctx.token_store.get_token(&state_key).await?.is_some());
 
     let auth_code = "burn_test_code_1";
     ctx.google_provider.register_profile(
