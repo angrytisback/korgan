@@ -126,22 +126,29 @@ impl OAuthProviderPort for GithubOAuthAdapter {
         OAuthProvider::GitHub
     }
 
-    fn build_authorization_url(&self, state: &str) -> String {
+    fn build_authorization_url(&self, state: &str, code_challenge: &str) -> String {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("client_id", &self.client_id)
             .append_pair("redirect_uri", &self.redirect_uri)
             .append_pair("scope", "read:user user:email")
             .append_pair("state", state)
+            .append_pair("code_challenge", code_challenge)
+            .append_pair("code_challenge_method", "S256")
             .finish();
         format!("{}?{query}", self.auth_url)
     }
 
-    async fn exchange_code(&self, code: &str) -> Result<OAuthProfile, PortError> {
+    async fn exchange_code(
+        &self,
+        code: &str,
+        code_verifier: &str,
+    ) -> Result<OAuthProfile, PortError> {
         let params = [
             ("code", code),
             ("client_id", &self.client_id),
             ("client_secret", self.client_secret.expose_secret()),
             ("redirect_uri", &self.redirect_uri),
+            ("code_verifier", code_verifier),
         ];
 
         let res = self

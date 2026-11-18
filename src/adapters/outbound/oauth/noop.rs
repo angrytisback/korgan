@@ -26,11 +26,15 @@ impl OAuthProviderPort for NoopOAuthProvider {
         self.provider
     }
 
-    fn build_authorization_url(&self, _state: &str) -> String {
+    fn build_authorization_url(&self, _state: &str, _code_challenge: &str) -> String {
         format!("https://disabled.example.com/oauth/{}", self.provider)
     }
 
-    async fn exchange_code(&self, _code: &str) -> Result<OAuthProfile, PortError> {
+    async fn exchange_code(
+        &self,
+        _code: &str,
+        _code_verifier: &str,
+    ) -> Result<OAuthProfile, PortError> {
         Err(PortError::external_service(
             self.provider.as_str(),
             format!(

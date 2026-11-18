@@ -314,11 +314,17 @@ pub trait OAuthProviderPort: Send + Sync + 'static {
     /// Returns the provider type handled by this adapter.
     fn provider(&self) -> OAuthProvider;
 
-    /// Builds the authorization redirect URL with anti-CSRF `state`.
-    fn build_authorization_url(&self, state: &str) -> String;
+    /// Builds the authorization redirect URL with anti-CSRF `state` and the
+    /// RFC 7636 `S256` PKCE `code_challenge`.
+    fn build_authorization_url(&self, state: &str, code_challenge: &str) -> String;
 
-    /// Exchanges the authorization `code` for user profile claims.
-    async fn exchange_code(&self, code: &str) -> Result<OAuthProfile, PortError>;
+    /// Exchanges the authorization `code` (proving possession with the RFC 7636
+    /// `code_verifier`) for user profile claims.
+    async fn exchange_code(
+        &self,
+        code: &str,
+        code_verifier: &str,
+    ) -> Result<OAuthProfile, PortError>;
 }
 
 /// External service port for WebAuthn / FIDO2 Passkey ceremonies.

@@ -1044,14 +1044,18 @@ impl OAuthProviderPort for MockOAuthProvider {
         self.provider
     }
 
-    fn build_authorization_url(&self, state: &str) -> String {
+    fn build_authorization_url(&self, state: &str, _code_challenge: &str) -> String {
         format!(
             "https://{}.oauth.local/auth?state={state}",
             self.provider.as_str()
         )
     }
 
-    async fn exchange_code(&self, code: &str) -> Result<OAuthProfile, PortError> {
+    async fn exchange_code(
+        &self,
+        code: &str,
+        _code_verifier: &str,
+    ) -> Result<OAuthProfile, PortError> {
         let profiles = self
             .profiles
             .lock()

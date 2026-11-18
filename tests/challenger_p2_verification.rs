@@ -898,14 +898,18 @@ impl OAuthProviderPort for ChallengerOAuthProvider {
         self.provider
     }
 
-    fn build_authorization_url(&self, state: &str) -> String {
+    fn build_authorization_url(&self, state: &str, _code_challenge: &str) -> String {
         format!(
             "{}?client_id=challenger_client&state={}&scope=openid+email",
             self.auth_base_url, state
         )
     }
 
-    async fn exchange_code(&self, code: &str) -> Result<OAuthProfile, PortError> {
+    async fn exchange_code(
+        &self,
+        code: &str,
+        _code_verifier: &str,
+    ) -> Result<OAuthProfile, PortError> {
         let responses = self.responses.lock().map_err(|e| {
             PortError::external_service(self.provider.as_str(), e.to_string(), None)
         })?;
@@ -1098,10 +1102,9 @@ async fn test_adversarial_oauth_state_burned_on_cookie_mismatch_blocks_replay() 
     let url_resp: OAuthUrlResponse = parse_json(res_url).await?;
 
     let state_key = format!("oauth:state:google:{}", url_resp.state);
-    assert_eq!(
-        ctx.token_store.get_token(&state_key).await?.as_deref(),
-        Some("valid"),
-        "State token must initially exist in TokenStore"
+    assert!(
+        ctx.token_store.get_token(&state_key).await?.is_some(),
+        "State record (PKCE verifier) must initially exist in TokenStore"
     );
 
     let auth_code = "adversarial_code_1";
@@ -1174,10 +1177,7 @@ async fn test_adversarial_oauth_state_burned_on_failed_code_exchange_blocks_repl
     let url_resp: OAuthUrlResponse = parse_json(res_url).await?;
 
     let state_key = format!("oauth:state:google:{}", url_resp.state);
-    assert_eq!(
-        ctx.token_store.get_token(&state_key).await?.as_deref(),
-        Some("valid")
-    );
+    assert!(ctx.token_store.get_token(&state_key).await?.is_some());
 
     // 2. Configure provider so that code exchange for "invalid_code_xyz" returns an error
     let invalid_code = "invalid_code_xyz";

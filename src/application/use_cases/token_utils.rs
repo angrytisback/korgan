@@ -96,6 +96,13 @@ pub fn generate_opaque_token() -> (String, String) {
     (raw, hash)
 }
 
+/// Derives the RFC 7636 `S256` PKCE `code_challenge` for a `code_verifier`
+/// (`BASE64URL(SHA256(verifier))`, unpadded).
+#[must_use]
+pub fn pkce_s256_challenge(code_verifier: &str) -> String {
+    BASE64_URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()))
+}
+
 /// Computes the SHA-256 hex digest of a raw token.
 #[must_use]
 pub fn hash_token(raw_token: &str) -> String {
@@ -214,6 +221,14 @@ mod tests {
         assert_ne!(raw, "");
         assert_eq!(hash.len(), 64);
         assert_eq!(hash, hash_token(&raw));
+    }
+
+    #[test]
+    fn pkce_s256_matches_rfc7636_appendix_b() {
+        assert_eq!(
+            pkce_s256_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
     }
 
     #[test]
