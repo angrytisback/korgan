@@ -4,8 +4,6 @@
 //! - OAuth Account Linking Transaction Atomicity: Rollback on link failure (no orphaned users)
 //! - Concurrency stress testing: profile update vs admin suspension and brute-force lockout
 
-#![allow(unsafe_code)]
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

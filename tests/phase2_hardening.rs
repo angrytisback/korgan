@@ -634,13 +634,13 @@ async fn test_step_up_stale_auth_time_rejected_403() -> TestResult {
     let claims = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: stale_auth_time,
-        amr: vec!["pwd".to_owned()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let token = harness.token_signer.sign_access_token(&claims)?;
 
@@ -691,13 +691,13 @@ async fn test_step_up_mfa_user_missing_amr_rejected_403() -> TestResult {
     let claims = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: fresh_auth_time,
-        amr: vec!["pwd".to_owned()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let token = harness.token_signer.sign_access_token(&claims)?;
 
@@ -755,13 +755,13 @@ async fn test_step_up_passkey_user_missing_amr_rejected_403() -> TestResult {
     let claims = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: Utc::now().timestamp(),
-        amr: vec!["pwd".to_owned()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let token = harness.token_signer.sign_access_token(&claims)?;
 
@@ -806,13 +806,16 @@ async fn test_step_up_valid_mfa_amr_and_fresh_auth_time_succeeds() -> TestResult
     let claims = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: Utc::now().timestamp() - 60,
-        amr: vec!["pwd".to_owned(), "mfa".to_owned()],
+        amr: smallvec::smallvec![
+            std::borrow::Cow::Borrowed("pwd"),
+            std::borrow::Cow::Borrowed("mfa"),
+        ],
     };
     let token = harness.token_signer.sign_access_token(&claims)?;
 
@@ -858,13 +861,13 @@ async fn test_step_up_standard_user_without_mfa_succeeds_with_fresh_auth_time() 
     let claims = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: Utc::now().timestamp() - 30,
-        amr: vec!["pwd".to_owned()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let token = harness.token_signer.sign_access_token(&claims)?;
 
@@ -917,13 +920,13 @@ async fn test_step_up_passkey_user_with_passkey_amr_succeeds() -> TestResult {
     let claims = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: Utc::now().timestamp() - 45,
-        amr: vec!["passkey".to_owned()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("passkey")],
     };
     let token = harness.token_signer.sign_access_token(&claims)?;
 
@@ -968,13 +971,13 @@ async fn test_step_up_first_passkey_register_and_password_change_succeeds_with_p
     let claims = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: Utc::now().timestamp() - 30,
-        amr: vec!["pwd".to_owned()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let token = harness.token_signer.sign_access_token(&claims)?;
 
@@ -1039,13 +1042,13 @@ async fn test_step_up_user_with_active_mfa_or_passkey_denied_with_pwd_only() -> 
     let claims_a = AccessTokenClaims {
         sub: user_a_id,
         sid: session_a_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: Utc::now().timestamp() - 10,
-        amr: vec!["pwd".to_owned()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let token_a = harness.token_signer.sign_access_token(&claims_a)?;
 
@@ -1103,13 +1106,13 @@ async fn test_step_up_user_with_active_mfa_or_passkey_denied_with_pwd_only() -> 
     let claims_b = AccessTokenClaims {
         sub: user_b_id,
         sid: session_b_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: Utc::now().timestamp() - 10,
-        amr: vec!["pwd".to_owned()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let token_b = harness.token_signer.sign_access_token(&claims_b)?;
 
@@ -1164,13 +1167,13 @@ async fn test_step_up_clock_skew_tolerance_and_forward_limit() -> TestResult {
     let claims_tolerated = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: Utc::now().timestamp() + 20,
-        amr: vec!["pwd".to_owned()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let token_tolerated = harness.token_signer.sign_access_token(&claims_tolerated)?;
 
@@ -1186,13 +1189,13 @@ async fn test_step_up_clock_skew_tolerance_and_forward_limit() -> TestResult {
     let claims_exceeded = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: Utc::now().timestamp() + 45,
-        amr: vec!["pwd".to_owned()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let token_exceeded = harness.token_signer.sign_access_token(&claims_exceeded)?;
 
@@ -1212,13 +1215,13 @@ async fn test_step_up_clock_skew_tolerance_and_forward_limit() -> TestResult {
     let claims_empty_amr = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: Utc::now().timestamp() - 10,
-        amr: vec![],
+        amr: smallvec::smallvec![],
     };
     let token_empty_amr = harness.token_signer.sign_access_token(&claims_empty_amr)?;
 
@@ -1492,6 +1495,7 @@ fn test_process_memory_hardening_execution() {
             rlim_cur: 1,
             rlim_max: 1,
         };
+        // SAFETY: libc::getrlimit is invoked with a valid pointer to a stack-allocated rlimit struct.
         let ret = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut rlim) };
         assert_eq!(ret, 0);
         assert_eq!(rlim.rlim_cur, 0);
@@ -1612,13 +1616,13 @@ async fn test_step_up_revoked_session_returns_401_even_with_stale_auth_time() ->
     let claims = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: stale_auth_time,
-        amr: vec!["pwd".to_owned()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let token = harness.token_signer.sign_access_token(&claims)?;
 

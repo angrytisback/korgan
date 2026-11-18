@@ -4,6 +4,56 @@
 
 use tracing::{debug, info, warn};
 
+/// Sets the process `RLIMIT_CORE` resource limit to 0, preventing core dump generation.
+///
+/// # Errors
+///
+/// Returns an [`std::io::Error`] if the `setrlimit` system call fails.
+pub fn disable_core_dumps() -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        let rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: setrlimit is invoked with a valid pointer to a stack-allocated rlimit struct.
+        let ret = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &rlim) };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(())
+    }
+}
+
+/// Sets the Linux `PR_SET_DUMPABLE` flag for the current process.
+///
+/// Setting `dumpable` to `false` disables ptrace attachment and core dump creation.
+///
+/// # Errors
+///
+/// Returns an [`std::io::Error`] if the `prctl` system call fails.
+pub fn set_dumpable(dumpable: bool) -> Result<(), std::io::Error> {
+    #[cfg(target_os = "linux")]
+    {
+        let arg = if dumpable { 1 } else { 0 };
+        // SAFETY: prctl with PR_SET_DUMPABLE and valid integer flag is a standard Linux syscall.
+        let ret = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, arg, 0, 0, 0) };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = dumpable;
+        Ok(())
+    }
+}
+
 /// Hardens process memory against involuntary core dumps containing sensitive cryptographic keys.
 ///
 /// Implements:
@@ -13,31 +63,19 @@ use tracing::{debug, info, warn};
 pub fn harden_process_memory() {
     #[cfg(unix)]
     {
-        // 1. POSIX RLIMIT_CORE = 0: Disables core dump file creation on Unix kernels
-        let rlim = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: setrlimit is invoked with a valid pointer to stack-allocated rlimit struct.
-        let ret = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &rlim) };
-        if ret != 0 {
-            warn!("unable to set RLIMIT_CORE to 0 via setrlimit");
-        } else {
-            info!("process RLIMIT_CORE set to 0 (core dumps disabled)");
+        match disable_core_dumps() {
+            Ok(()) => info!("process RLIMIT_CORE set to 0 (core dumps disabled)"),
+            Err(e) => warn!(error = %e, "unable to set RLIMIT_CORE to 0 via setrlimit"),
         }
 
-        // 2. Linux-specific PR_SET_DUMPABLE = 0
         #[cfg(target_os = "linux")]
         {
-            // SAFETY: prctl with PR_SET_DUMPABLE and arg 0 is a standard Linux syscall.
-            let ret = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
-            if ret != 0 {
-                warn!("unable to set PR_SET_DUMPABLE to 0 via prctl");
-            } else {
-                info!("process PR_SET_DUMPABLE set to 0");
+            match set_dumpable(false) {
+                Ok(()) => info!("process PR_SET_DUMPABLE set to 0"),
+                Err(e) => warn!(error = %e, "unable to set PR_SET_DUMPABLE to 0 via prctl"),
             }
 
-            // 3. Defense-in-depth: /proc/self/coredump_filter = 0
+            // Defense-in-depth: /proc/self/coredump_filter = 0
             match std::fs::write("/proc/self/coredump_filter", "0\n") {
                 Ok(()) => {
                     debug!("process core dump filter set to 0");
