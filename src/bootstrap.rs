@@ -110,7 +110,7 @@ pub fn build_state(settings: Arc<Settings>) -> Result<(AppState, EventWorker), B
 
     // 5. External Services (HIBP & Mail & OAuth)
     let hibp_client: Arc<dyn HibpClient> = if settings.hibp.enabled {
-        Arc::new(ReqwestHibpClient::new(settings.hibp.api_url.clone()))
+        Arc::new(ReqwestHibpClient::new(settings.hibp.api_url.clone())?)
     } else {
         Arc::new(NoopHibpClient)
     };
@@ -148,7 +148,7 @@ pub fn build_state(settings: Arc<Settings>) -> Result<(AppState, EventWorker), B
                 client_id.clone(),
                 client_secret.clone(),
                 redirect_uri.clone(),
-            ))
+            )?)
         } else {
             Arc::new(NoopOAuthProvider::new(OAuthProvider::Google))
         }
@@ -166,7 +166,7 @@ pub fn build_state(settings: Arc<Settings>) -> Result<(AppState, EventWorker), B
                 client_id.clone(),
                 client_secret.clone(),
                 redirect_uri.clone(),
-            ))
+            )?)
         } else {
             Arc::new(NoopOAuthProvider::new(OAuthProvider::GitHub))
         }

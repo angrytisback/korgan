@@ -62,12 +62,15 @@ struct GithubEmail {
 
 impl GithubOAuthAdapter {
     /// Creates a new [`GithubOAuthAdapter`].
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PortError`] if the hardened HTTP client cannot be built.
     pub fn new(
         client_id: impl Into<String>,
         client_secret: SecretString,
         redirect_uri: impl Into<String>,
-    ) -> Self {
+    ) -> Result<Self, PortError> {
         Self::with_endpoints(
             client_id,
             client_secret,
@@ -80,7 +83,11 @@ impl GithubOAuthAdapter {
     }
 
     /// Creates an adapter with custom endpoints (useful for integration testing).
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PortError`] if the hardened HTTP client cannot be built; the
+    /// adapter never falls back to an unhardened client.
     pub fn with_endpoints(
         client_id: impl Into<String>,
         client_secret: SecretString,
@@ -89,7 +96,7 @@ impl GithubOAuthAdapter {
         token_url: impl Into<String>,
         user_url: impl Into<String>,
         emails_url: impl Into<String>,
-    ) -> Self {
+    ) -> Result<Self, PortError> {
         let token_url_str = token_url.into();
         let user_url_str = user_url.into();
         let emails_url_str = emails_url.into();
@@ -98,10 +105,9 @@ impl GithubOAuthAdapter {
             || !user_url_str.starts_with("https://")
             || !emails_url_str.starts_with("https://");
         let client =
-            crate::adapters::outbound::http_client::create_hardened_client("github", allow_http)
-                .unwrap_or_default();
+            crate::adapters::outbound::http_client::create_hardened_client("github", allow_http)?;
 
-        Self {
+        Ok(Self {
             client,
             client_id: client_id.into(),
             client_secret,
@@ -110,7 +116,7 @@ impl GithubOAuthAdapter {
             token_url: token_url_str,
             user_url: user_url_str,
             emails_url: emails_url_str,
-        }
+        })
     }
 }
 
@@ -121,10 +127,13 @@ impl OAuthProviderPort for GithubOAuthAdapter {
     }
 
     fn build_authorization_url(&self, state: &str) -> String {
-        format!(
-            "{}?client_id={}&redirect_uri={}&scope=read:user%20user:email&state={}",
-            self.auth_url, self.client_id, self.redirect_uri, state
-        )
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("client_id", &self.client_id)
+            .append_pair("redirect_uri", &self.redirect_uri)
+            .append_pair("scope", "read:user user:email")
+            .append_pair("state", state)
+            .finish();
+        format!("{}?{query}", self.auth_url)
     }
 
     async fn exchange_code(&self, code: &str) -> Result<OAuthProfile, PortError> {

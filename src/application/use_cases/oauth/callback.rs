@@ -190,6 +190,17 @@ impl OAuthCallbackUseCase {
                 self.defend_pre_account_takeover(existing_user, now).await?
             } else {
                 existing_user.can_login(now)?;
+                // A first-time email-based link must not let a federated login
+                // sidestep the account's second factor: MFA-protected accounts
+                // have to be linked from an authenticated session instead.
+                if existing_user.mfa_enabled {
+                    tracing::warn!(
+                        user_id = %existing_user.id,
+                        provider = provider.as_str(),
+                        "refusing email-based OAuth link onto MFA-protected account"
+                    );
+                    return Err(AppError::Forbidden);
+                }
                 existing_user
             };
             (resolved, false)

@@ -10,7 +10,6 @@ use crate::domain::value_objects::RawPassword;
 use crate::ports::errors::PortError;
 use crate::ports::services::HibpClient;
 
-const HIBP_RANGE_API_URL: &str = "https://api.pwnedpasswords.com/range";
 const USER_AGENT_VALUE: &str = "korgan-security-checker/0.1";
 
 /// Production HIBP client communicating with the k-Anonymity range API.
@@ -20,16 +19,14 @@ pub struct ReqwestHibpClient {
     endpoint: String,
 }
 
-impl Default for ReqwestHibpClient {
-    fn default() -> Self {
-        Self::new(HIBP_RANGE_API_URL)
-    }
-}
-
 impl ReqwestHibpClient {
     /// Creates a new [`ReqwestHibpClient`] pointing to the given endpoint.
-    #[must_use]
-    pub fn new(endpoint: impl Into<String>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PortError`] if the hardened HTTP client cannot be built; it
+    /// never falls back to an unhardened client.
+    pub fn new(endpoint: impl Into<String>) -> Result<Self, PortError> {
         let ep = endpoint.into();
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
@@ -39,12 +36,18 @@ impl ReqwestHibpClient {
             crate::adapters::outbound::http_client::create_hardened_client_builder(allow_http)
                 .default_headers(headers)
                 .build()
-                .unwrap_or_default();
+                .map_err(|e| {
+                    PortError::external_service(
+                        "hibp",
+                        format!("failed to initialize HTTP client: {e}"),
+                        Some(Box::new(e)),
+                    )
+                })?;
 
-        Self {
+        Ok(Self {
             client,
             endpoint: ep,
-        }
+        })
     }
 
     /// Computes the uppercase SHA-1 hash of the password and splits into (prefix, suffix).

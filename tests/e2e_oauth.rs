@@ -1315,6 +1315,59 @@ async fn test_oauth_existing_user_linking() -> TestResult {
     Ok(())
 }
 
+/// KRG-SEC-09: first-time email-based OAuth linking onto an Active account that
+/// has MFA enabled must be refused; otherwise a federated login silently
+/// bypasses the second factor.
+#[tokio::test]
+async fn test_oauth_email_link_refused_for_mfa_protected_account() -> TestResult {
+    let ctx = setup_app().await?;
+
+    let email = EmailAddress::parse("mfa.protected@example.com")?;
+    let mut user = User::new(email.clone(), None, None);
+    user.status = AccountStatus::Active;
+    user.email_verified_at = Some(chrono::Utc::now());
+    user.enable_mfa(chrono::Utc::now());
+    ctx.user_repo.create(&user).await?;
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/auth/oauth/github/url")
+        .body(Body::empty())?;
+    let res = send_request(&ctx.app, req).await?;
+    let url_resp: OAuthUrlResponse = json_body(res).await?;
+
+    let auth_code = "github_code_mfa_link";
+    ctx.github_provider.register_profile(
+        auth_code,
+        OAuthProfile {
+            provider: OAuthProvider::GitHub,
+            provider_user_id: "github-id-mfa-1".to_owned(),
+            email: email.clone(),
+            name: None,
+        },
+    )?;
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "/api/v1/auth/oauth/github/callback?code={}&state={}",
+            auth_code, url_resp.state
+        ))
+        .header("Cookie", format!("__Host-oauth_state={}", url_resp.state))
+        .body(Body::empty())?;
+    let res = send_request(&ctx.app, req).await?;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    assert!(
+        ctx.oauth_repo
+            .find_by_provider_and_id(OAuthProvider::GitHub, "github-id-mfa-1")
+            .await?
+            .is_none(),
+        "no OAuth link may be created for an MFA-protected account"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_oauth_anti_csrf_state_validation_failure() -> TestResult {
     let ctx = setup_app().await?;
@@ -1677,7 +1730,7 @@ async fn test_oauth_google_rejects_unverified_email() -> TestResult {
         "http://localhost:8080/auth",
         format!("http://127.0.0.1:{port}/token"),
         format!("http://127.0.0.1:{port}/userinfo_unverified"),
-    );
+    )?;
 
     let err1 = match adapter_unverified.exchange_code("code_unverified").await {
         Err(e) => e,
@@ -1700,7 +1753,7 @@ async fn test_oauth_google_rejects_unverified_email() -> TestResult {
         "http://localhost:8080/auth",
         format!("http://127.0.0.1:{port}/token"),
         format!("http://127.0.0.1:{port}/userinfo_missing_verified"),
-    );
+    )?;
 
     let err2 = match adapter_missing.exchange_code("code_missing").await {
         Err(e) => e,
@@ -1826,7 +1879,7 @@ async fn test_oauth_github_ignores_public_bio_email() -> TestResult {
         format!("http://127.0.0.1:{port}/login/oauth/access_token"),
         format!("http://127.0.0.1:{port}/user"),
         format!("http://127.0.0.1:{port}/user/emails_unverified"),
-    );
+    )?;
 
     let err = match adapter_unverified.exchange_code("code_unverified").await {
         Err(e) => e,
@@ -1854,7 +1907,7 @@ async fn test_oauth_github_ignores_public_bio_email() -> TestResult {
         format!("http://127.0.0.1:{port}/login/oauth/access_token"),
         format!("http://127.0.0.1:{port}/user"),
         format!("http://127.0.0.1:{port}/user/emails_verified"),
-    );
+    )?;
 
     let profile = adapter_verified.exchange_code("code_verified").await?;
 

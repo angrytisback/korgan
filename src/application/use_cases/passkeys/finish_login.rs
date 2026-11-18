@@ -227,15 +227,16 @@ impl FinishPasskeyLoginUseCase {
         let (_auth_result, updated_passkey) = match verify_res {
             Ok(res) => res,
             Err(e) => {
+                let candidate = candidate_passkeys.first();
                 let audit = AuditLog::new(
-                    Some(candidate_passkeys[0].user_id),
+                    candidate.map(|pk| pk.user_id),
                     Some(ip_address),
                     user_agent.map(str::to_owned),
                     request_id,
                     audit_events::PASSKEY_LOGIN,
                     AuditEventStatus::Failure,
                     serde_json::json!({
-                        "passkey_id": candidate_passkeys[0].id,
+                        "passkey_id": candidate.map(|pk| pk.id),
                         "reason": e.to_string(),
                     }),
                 );
