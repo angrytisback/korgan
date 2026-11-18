@@ -46,8 +46,9 @@ pub async fn blacklist_sessions(
             let token_store = token_store.clone();
             async move {
                 let mut key_buf = [0u8; 54];
-                key_buf[..18].copy_from_slice(BLACKLIST_SESSION_PREFIX);
-                let _ = sid.as_uuid().hyphenated().encode_lower(&mut key_buf[18..]);
+                let (prefix, uuid_part) = key_buf.split_at_mut(18);
+                prefix.copy_from_slice(BLACKLIST_SESSION_PREFIX);
+                let _ = sid.as_uuid().hyphenated().encode_lower(uuid_part);
                 let key = std::str::from_utf8(&key_buf).unwrap_or_default();
                 token_store.set_token(key, "revoked", ttl).await?;
                 Ok(())
@@ -64,8 +65,9 @@ pub async fn blacklist_sessions(
             let mut buf = vec![0u8; ids.len() * 54];
             let (mut_chunks, _) = buf.as_chunks_mut::<54>();
             for (slot, sid) in mut_chunks.iter_mut().zip(ids.iter()) {
-                slot[..18].copy_from_slice(BLACKLIST_SESSION_PREFIX);
-                let _ = sid.as_uuid().hyphenated().encode_lower(&mut slot[18..]);
+                let (prefix, uuid_part) = slot.split_at_mut(18);
+                prefix.copy_from_slice(BLACKLIST_SESSION_PREFIX);
+                let _ = sid.as_uuid().hyphenated().encode_lower(uuid_part);
             }
             let (chunks, _) = buf.as_chunks::<54>();
             let borrowed: Vec<(&str, &str, Duration)> = chunks
@@ -102,8 +104,11 @@ pub fn hash_token(raw_token: &str) -> String {
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(64);
     for &b in &digest {
-        hex.push(char::from(HEX_CHARS[usize::from(b >> 4)]));
-        hex.push(char::from(HEX_CHARS[usize::from(b & 0x0F)]));
+        for nibble in [b >> 4, b & 0x0F] {
+            hex.push(char::from(
+                HEX_CHARS.get(usize::from(nibble)).copied().unwrap_or(b'0'),
+            ));
+        }
     }
     hex
 }

@@ -25,8 +25,12 @@ impl fmt::Write for StackBuf<'_> {
         if bytes.len() > remain {
             return Err(fmt::Error);
         }
-        self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
-        self.len += bytes.len();
+        let end = self.len + bytes.len();
+        self.buf
+            .get_mut(self.len..end)
+            .ok_or(fmt::Error)?
+            .copy_from_slice(bytes);
+        self.len = end;
         Ok(())
     }
 }
@@ -218,7 +222,7 @@ impl AuditLog {
                 len: 0,
             };
             let _ = write!(writer, "{ip}");
-            hasher.update(&writer.buf[..writer.len]);
+            hasher.update(writer.buf.get(..writer.len).unwrap_or_default());
         }
         hasher.update(b"|");
 
@@ -247,7 +251,7 @@ impl AuditLog {
             len: 0,
         };
         let _ = write!(writer, "{}", self.created_at.timestamp());
-        hasher.update(&writer.buf[..writer.len]);
+        hasher.update(writer.buf.get(..writer.len).unwrap_or_default());
         hasher.update(b"|");
 
         let _ = serde_json::to_writer(HasherWriter(&mut hasher), &self.metadata);
@@ -262,9 +266,10 @@ impl AuditLog {
     pub fn compute_entry_hash_hex(&self, prev_hash: Option<&str>) -> [u8; 64] {
         let digest = self.compute_entry_hash_raw(prev_hash);
         let mut hex = [0u8; 64];
-        for (i, &b) in digest.iter().enumerate() {
-            hex[i * 2] = HEX_CHARS[(b >> 4) as usize];
-            hex[i * 2 + 1] = HEX_CHARS[(b & 0x0f) as usize];
+        for (pair, &b) in hex.as_chunks_mut::<2>().0.iter_mut().zip(digest.iter()) {
+            for (dst, nibble) in pair.iter_mut().zip([b >> 4, b & 0x0f]) {
+                *dst = HEX_CHARS.get(usize::from(nibble)).copied().unwrap_or(b'0');
+            }
         }
         hex
     }

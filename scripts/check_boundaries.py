@@ -10,6 +10,11 @@ Validates three strict engineering mandates:
    - Production code in `src/` must NEVER contain `.unwrap()` or `.expect()`.
 3. Zero-Placeholder Policy:
    - Production code in `src/` must NEVER contain `todo!()` or `unimplemented!()`.
+4. No direct indexing / slicing (`x[i]`, `x[..n]`) in production code:
+   - Use `.get()`, `.first()`, iterators or `split_at_checked`. A line whose
+     bounds are provable (fixed-size buffer, length checked right above) may
+     opt out with a trailing `// index-ok: <reason>` comment; the reason is
+     mandatory so every exception is reviewable.
 """
 
 import os
@@ -41,9 +46,19 @@ def scan_file(path, check_fn):
         in_test_mod = False
         test_brace_depth = 0
         in_block_comment = False
+        in_raw_string = False
 
         for idx, raw_line in enumerate(f, 1):
             line = raw_line.strip()
+
+            # Skip the body of multi-line raw string literals (e.g. embedded Lua).
+            if in_raw_string:
+                if re.search(r'"#', line):
+                    in_raw_string = False
+                continue
+            if re.search(r'r#+"', line) and not re.search(r'r#+".*?"#', line):
+                in_raw_string = True
+                continue
 
             # Handle block comments
             if in_block_comment:
@@ -80,6 +95,34 @@ def scan_file(path, check_fn):
 
             file_violations = check_fn(path, idx, cleaned, raw_line.strip())
             violations.extend(file_violations)
+
+    return violations
+
+
+# `ident[`, `)[` or `][` directly adjacent: an index/slice expression. Types
+# (`[u8; 4]`), attributes (`#[`), macros (`vec![`) and slice literals (`&[`)
+# are never preceded by an identifier character or closing bracket.
+INDEX_RE = re.compile(r"(?:[A-Za-z0-9_]|\)|\])\[")
+INDEX_OK_RE = re.compile(r"//\s*index-ok:\s*\S+")
+
+
+def check_direct_indexing():
+    violations = []
+
+    def index_check(path, idx, cleaned, raw):
+        if INDEX_OK_RE.search(raw):
+            return []
+        if INDEX_RE.search(cleaned):
+            return [
+                f"  [INDEXING VIOLATION] {path}:{idx}: direct indexing/slicing (use .get(), or add `// index-ok: <reason>`):\n    {raw}"
+            ]
+        return []
+
+    for root, _, files in os.walk("src"):
+        for file in files:
+            if file.endswith(".rs"):
+                path = os.path.join(root, file)
+                violations.extend(scan_file(path, index_check))
 
     return violations
 
@@ -149,8 +192,9 @@ def main():
 
     hex_violations = check_hexagonal_boundaries()
     panic_violations = check_zero_panic()
+    index_violations = check_direct_indexing()
 
-    total_violations = len(hex_violations) + len(panic_violations)
+    total_violations = len(hex_violations) + len(panic_violations) + len(index_violations)
 
     if total_violations > 0:
         if hex_violations:
@@ -161,11 +205,16 @@ def main():
             print("\n[FAIL] Zero-Panic / Placeholder Violations Detected in Production Code:")
             for v in panic_violations:
                 print(v)
+        if index_violations:
+            print("\n[FAIL] Direct Indexing Violations Detected in Production Code:")
+            for v in index_violations:
+                print(v)
         print(f"\nTotal violations: {total_violations}. Failing gate.")
         sys.exit(1)
 
     print("\n[PASS] All Hexagonal Architecture checks passed (0 forbidden imports).")
     print("[PASS] All Zero-Panic & Placeholder checks passed (0 unwrap/expect/todo in production code).")
+    print("[PASS] No unannotated direct indexing/slicing in production code.")
     print("=" * 70)
 
 

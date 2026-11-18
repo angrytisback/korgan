@@ -101,6 +101,53 @@ pub trait UserRepository: Send + Sync + 'static {
         }
     }
 
+    /// Granularly marks the e-mail as verified (activating an `Unverified`
+    /// account) for an `Unverified` or `Active` user, touching only
+    /// `email_verified_at`, `status` and `updated_at`. Returns `false` when the
+    /// user is missing or in any other status (e.g. suspended meanwhile).
+    async fn mark_email_verified(
+        &self,
+        id: &UserId,
+        now: DateTime<Utc>,
+    ) -> Result<bool, PortError> {
+        match self.find_by_id(id).await? {
+            Some(mut user)
+                if matches!(
+                    user.status,
+                    AccountStatus::Unverified | AccountStatus::Active
+                ) =>
+            {
+                user.verify_email(now);
+                self.update(&user).await?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Pre-account-takeover defence for OAuth linking: atomically, and only
+    /// while the account is still `Unverified`, clears the password hash and
+    /// lockout state, verifies the e-mail and activates the account. Returns
+    /// `false` when the account is no longer `Unverified` (e.g. banned in the
+    /// meantime), in which case nothing is changed.
+    async fn activate_unverified_for_oauth(
+        &self,
+        id: &UserId,
+        now: DateTime<Utc>,
+    ) -> Result<bool, PortError> {
+        match self.find_by_id(id).await? {
+            Some(mut user) if user.status == AccountStatus::Unverified => {
+                user.password_hash = None;
+                user.failed_login_attempts = 0;
+                user.locked_until = None;
+                user.verify_email(now);
+                self.update(&user).await?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Removes MFA configuration and disables MFA on the user record.
     async fn delete_mfa(&self, user_id: &UserId) -> Result<(), PortError>;
 

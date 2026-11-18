@@ -173,8 +173,11 @@ impl crate::ports::services::SecretCipher for Aes256GcmCipher {
         let digest = hmac_sha256(self.backup_code_key.as_slice(), code.as_bytes())?;
         let mut out = String::with_capacity(64);
         for b in digest {
-            out.push(char::from(HEX[usize::from(b >> 4)]));
-            out.push(char::from(HEX[usize::from(b & 0x0F)]));
+            for nibble in [b >> 4, b & 0x0F] {
+                out.push(char::from(
+                    HEX.get(usize::from(nibble)).copied().unwrap_or(b'0'),
+                ));
+            }
         }
         Ok(out)
     }

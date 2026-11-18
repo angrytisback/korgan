@@ -65,7 +65,7 @@ impl VerifyEmailUseCase {
             .parse()
             .map_err(|e| AppError::internal("invalid user id in token store", e))?;
 
-        let mut user = self
+        let user = self
             .user_repo
             .find_by_id(&user_id)
             .await?
@@ -82,11 +82,13 @@ impl VerifyEmailUseCase {
         }
 
         let now = Utc::now();
-        user.verify_email(now);
         self.event_bus
             .audited(
                 async {
-                    self.user_repo.update(&user).await?;
+                    // Granular write: never overwrite concurrent status/credential changes.
+                    if !self.user_repo.mark_email_verified(&user.id, now).await? {
+                        return Err(AppError::Forbidden);
+                    }
                     Ok::<(), AppError>(())
                 },
                 AuditLog::new(

@@ -487,6 +487,57 @@ impl UserRepository for PostgresUserRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn mark_email_verified(
+        &self,
+        id: &UserId,
+        now: DateTime<Utc>,
+    ) -> Result<bool, PortError> {
+        let mut conn = self.conn().await?;
+        let result = sqlx::query(
+            r#"
+            UPDATE users SET
+                email_verified_at = COALESCE(email_verified_at, $2),
+                status = CASE WHEN status = 'unverified' THEN 'active'::account_status ELSE status END,
+                updated_at = $2
+            WHERE id = $1 AND status IN ('unverified', 'active')
+            "#,
+        )
+        .bind(id.to_uuid())
+        .bind(now)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| Self::map_sqlx_error(e, "mark_email_verified"))?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn activate_unverified_for_oauth(
+        &self,
+        id: &UserId,
+        now: DateTime<Utc>,
+    ) -> Result<bool, PortError> {
+        let mut conn = self.conn().await?;
+        let result = sqlx::query(
+            r#"
+            UPDATE users SET
+                password_hash = NULL,
+                failed_login_attempts = 0,
+                locked_until = NULL,
+                email_verified_at = COALESCE(email_verified_at, $2),
+                status = 'active'::account_status,
+                updated_at = $2
+            WHERE id = $1 AND status = 'unverified'
+            "#,
+        )
+        .bind(id.to_uuid())
+        .bind(now)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| Self::map_sqlx_error(e, "activate_unverified_for_oauth"))?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn enable_mfa(&self, mfa: &UserMfa) -> Result<(), PortError> {
         let mut conn = self.conn().await?;
         let user_uuid = mfa.user_id.to_uuid();
