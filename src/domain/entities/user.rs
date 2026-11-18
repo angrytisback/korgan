@@ -71,6 +71,19 @@ impl UserRole {
         }
     }
 
+    /// Returns true if an actor holding this role may administer (ban/unban)
+    /// an account holding `target`: a `Superadmin` may manage anyone but
+    /// another `Superadmin`, an `Admin` may only manage plain users, and a
+    /// plain user manages nobody.
+    #[inline]
+    #[must_use]
+    pub const fn can_manage(self, target: Self) -> bool {
+        matches!(
+            (self, target),
+            (Self::Superadmin, Self::User | Self::Admin) | (Self::Admin, Self::User)
+        )
+    }
+
     /// Returns true if this role has administrative privileges.
     #[inline]
     #[must_use]
@@ -262,10 +275,17 @@ impl User {
         self.updated_at = now;
     }
 
-    /// Restores a suspended account to Active status.
+    /// Restores a suspended account to its pre-suspension standing.
     #[inline]
+    ///
+    /// An account whose e-mail was never verified returns to `Unverified`
+    /// rather than `Active`, so an unban can never bypass e-mail verification.
     pub const fn unban(&mut self, now: DateTime<Utc>) {
-        self.status = AccountStatus::Active;
+        self.status = if self.email_verified_at.is_some() {
+            AccountStatus::Active
+        } else {
+            AccountStatus::Unverified
+        };
         self.updated_at = now;
     }
 }
@@ -304,6 +324,18 @@ mod tests {
 
     const TEST_HASH: &str =
         "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$MhP2+71y6FpS2z+Gz2f8rW9N2A7mJ1t8y9A4dK0b6L8";
+
+    #[test]
+    fn role_hierarchy_for_administration() {
+        use UserRole::{Admin, Superadmin, User};
+        assert!(Superadmin.can_manage(User));
+        assert!(Superadmin.can_manage(Admin));
+        assert!(!Superadmin.can_manage(Superadmin));
+        assert!(Admin.can_manage(User));
+        assert!(!Admin.can_manage(Admin));
+        assert!(!Admin.can_manage(Superadmin));
+        assert!(!User.can_manage(User));
+    }
 
     #[test]
     fn user_lifecycle_and_login_checks() -> TestResult {

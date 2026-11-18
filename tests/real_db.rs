@@ -389,6 +389,59 @@ async fn user_and_session_repositories_work_on_a_real_database() -> TestResult {
     db.drop_db().await
 }
 
+#[tokio::test]
+#[ignore = "needs KORGAN_TEST_DATABASE_URL"]
+async fn set_status_if_is_a_granular_compare_and_set() -> TestResult {
+    use korgan::domain::entities::AccountStatus;
+
+    let db = TestDb::create().await?;
+    korgan::bootstrap::run_migrations(&db.pool).await?;
+    let users = PostgresUserRepository::new(db.pool.clone());
+
+    let mut user = new_user(7)?;
+    user.status = AccountStatus::Active;
+    users.create(&user).await?;
+    let now = chrono::Utc::now();
+
+    // A concurrent password change lands between the admin's read and write.
+    users
+        .update_password(&user.id, &PasswordHash::new(DUMMY_HASH)?, 5)
+        .await?;
+
+    assert!(
+        users
+            .set_status_if(
+                &user.id,
+                AccountStatus::Active,
+                AccountStatus::Suspended,
+                now
+            )
+            .await?
+    );
+    let after = users.find_by_id(&user.id).await?.ok_or("user missing")?;
+    assert_eq!(after.status, AccountStatus::Suspended);
+    assert!(
+        after.password_hash.is_some(),
+        "status CAS must not overwrite the concurrently changed password hash"
+    );
+
+    // Stale expectation: no row is changed.
+    assert!(
+        !users
+            .set_status_if(
+                &user.id,
+                AccountStatus::Active,
+                AccountStatus::Deactivated,
+                now
+            )
+            .await?
+    );
+    let still = users.find_by_id(&user.id).await?.ok_or("user missing")?;
+    assert_eq!(still.status, AccountStatus::Suspended);
+
+    db.drop_db().await
+}
+
 /// Builds a bus whose audit entries commit together with the work it wraps.
 async fn atomic_bus(
     db: &TestDb,

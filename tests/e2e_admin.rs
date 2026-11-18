@@ -844,6 +844,7 @@ async fn test_rbac_and_admin_backoffice_flow() -> TestResult {
     );
     normal_user.id = normal_user_id;
     normal_user.status = AccountStatus::Active;
+    normal_user.email_verified_at = Some(chrono::Utc::now());
     normal_user.role = UserRole::User;
     ctx.user_repo.create(&normal_user).await?;
 
