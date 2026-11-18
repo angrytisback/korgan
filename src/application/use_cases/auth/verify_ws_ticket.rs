@@ -37,9 +37,8 @@ impl VerifyWsTicketUseCase {
         }
 
         // Atomically consume ticket (GETDEL)
-        let payload = match self.token_store.consume_ws_ticket(trimmed).await? {
-            Some(p) => p,
-            None => return Err(AppError::TokenInvalid),
+        let Some(payload) = self.token_store.consume_ws_ticket(trimmed).await? else {
+            return Err(AppError::TokenInvalid);
         };
 
         // Check if session has been revoked/blacklisted in Redis: blacklist:session:{sid}

@@ -13,7 +13,7 @@ use crate::ports::cache::{TokenStore, WsTicketPayload};
 /// Ephemeral ticket issued for WebSocket connection authentication.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WsTicketResult {
-    /// High-entropy Base64URL opaque ticket.
+    /// High-entropy `Base64URL` opaque ticket.
     pub ticket: String,
     /// Lifetime of ticket in seconds.
     pub expires_in: u64,
@@ -38,7 +38,7 @@ impl IssueWsTicketUseCase {
         Self { token_store }
     }
 
-    /// Issues a 32-byte CSPRNG Base64URL token via `OsRng` and writes the payload to Redis for 15s.
+    /// Issues a 32-byte CSPRNG `Base64URL` token via `OsRng` and writes the payload to Redis for 15s.
     ///
     /// # Errors
     ///

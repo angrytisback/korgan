@@ -999,7 +999,10 @@ async fn test_full_user_lifecycle_and_replay_detection() -> TestResult {
         .as_str()
         .ok_or("missing access token 1")?;
     let claims_1 = ctx.token_signer.verify_access_token(access_token_1)?;
-    assert_eq!(claims_1.amr, vec!["pwd"]);
+    assert_eq!(
+        claims_1.amr.as_slice(),
+        &[std::borrow::Cow::Borrowed("pwd")]
+    );
     assert!(claims_1.auth_time > 0);
 
     // =======================================================================
@@ -1094,7 +1097,13 @@ async fn test_full_user_lifecycle_and_replay_detection() -> TestResult {
         .as_str()
         .ok_or("missing access token 2")?;
     let claims_2 = ctx.token_signer.verify_access_token(access_token_2)?;
-    assert_eq!(claims_2.amr, vec!["pwd", "mfa"]);
+    assert_eq!(
+        claims_2.amr.as_slice(),
+        &[
+            std::borrow::Cow::Borrowed("pwd"),
+            std::borrow::Cow::Borrowed("mfa"),
+        ]
+    );
     let initial_auth_time = claims_2.auth_time;
     assert!(initial_auth_time > 0);
 
@@ -1120,7 +1129,13 @@ async fn test_full_user_lifecycle_and_replay_detection() -> TestResult {
         .as_str()
         .ok_or("missing access token 3")?;
     let claims_3 = ctx.token_signer.verify_access_token(access_token_3)?;
-    assert_eq!(claims_3.amr, vec!["pwd", "mfa"]);
+    assert_eq!(
+        claims_3.amr.as_slice(),
+        &[
+            std::borrow::Cow::Borrowed("pwd"),
+            std::borrow::Cow::Borrowed("mfa"),
+        ]
+    );
     // Original authentication time (auth_time) remains unchanged even after token rotation!
     assert_eq!(claims_3.auth_time, initial_auth_time);
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use validator::Validate;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::application::dto::{SetupTotpCommand, TotpSetupResult};
 use crate::application::error::AppError;
@@ -14,7 +14,7 @@ use crate::ports::repositories::UserRepository;
 use crate::ports::services::TotpService;
 
 /// Default validity lifetime for pending TOTP setups (15 minutes).
-pub const DEFAULT_PENDING_TOTP_TTL: Duration = Duration::from_secs(15 * 60);
+pub const DEFAULT_PENDING_TOTP_TTL: Duration = Duration::from_mins(15);
 
 /// Coordinates initiation of TOTP Multi-Factor Authentication.
 #[derive(Clone)]
@@ -31,7 +31,7 @@ impl std::fmt::Debug for SetupTotpUseCase {
         f.debug_struct("SetupTotpUseCase")
             .field("issuer", &self.issuer)
             .field("pending_ttl", &self.pending_ttl)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -68,21 +68,29 @@ impl SetupTotpUseCase {
             .await?
             .ok_or(AppError::Unauthenticated)?;
 
-        let mut secret_bytes = self.totp_service.generate_secret()?;
-        let qr_code_svg =
-            self.totp_service
-                .generate_qr_code_svg(&user.email, &secret_bytes, &self.issuer)?;
+        let user_id = user.id;
+        let email = user.email;
+        let totp_service = self.totp_service.clone();
+        let issuer = self.issuer.clone();
+        let mut secret_bytes = Zeroizing::new(self.totp_service.generate_secret()?);
 
-        let base32_secret = encode_base32(&secret_bytes);
-        secret_bytes.zeroize();
-        let pending_key = format!("pending_totp:{}", user.id);
+        let (qr_code_svg, mut base32_secret) = tokio::task::spawn_blocking(move || {
+            let qr_res = totp_service.generate_qr_code_svg(&email, &secret_bytes, &issuer);
+            let outcome = qr_res.map(|svg| (svg, Zeroizing::new(encode_base32(&secret_bytes))));
+            secret_bytes.zeroize();
+            outcome
+        })
+        .await
+        .map_err(|e| AppError::internal("TOTP setup generation task failed", e))??;
+
+        let pending_key = format!("pending_totp:{user_id}");
 
         self.token_store
             .set_token(&pending_key, &base32_secret, self.pending_ttl)
             .await?;
 
         Ok(TotpSetupResult {
-            secret: base32_secret,
+            secret: std::mem::take(&mut *base32_secret),
             qr_code_svg,
         })
     }

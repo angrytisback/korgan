@@ -33,14 +33,14 @@ struct ShieldedGuard;
 
 impl ShieldedGuard {
     fn new() -> Self {
-        ACTIVE_SHIELDED_TASKS.fetch_add(1, Ordering::SeqCst);
+        ACTIVE_SHIELDED_TASKS.fetch_add(1, Ordering::Relaxed);
         Self
     }
 }
 
 impl Drop for ShieldedGuard {
     fn drop(&mut self) {
-        let prev = ACTIVE_SHIELDED_TASKS.fetch_sub(1, Ordering::SeqCst);
+        let prev = ACTIVE_SHIELDED_TASKS.fetch_sub(1, Ordering::AcqRel);
         if prev == 1 {
             SHIELDED_DRAIN_NOTIFY.notify_waiters();
         }
@@ -50,7 +50,7 @@ impl Drop for ShieldedGuard {
 /// Returns the current number of in-flight shielded tasks.
 #[must_use]
 pub fn active_shielded_tasks() -> usize {
-    ACTIVE_SHIELDED_TASKS.load(Ordering::SeqCst)
+    ACTIVE_SHIELDED_TASKS.load(Ordering::Acquire)
 }
 
 /// Waits for all currently in-flight shielded background tasks to drain, up to `timeout`.
@@ -62,7 +62,7 @@ pub async fn wait_for_shielded_tasks(timeout: Duration) -> bool {
         tokio::pin!(notified);
         notified.as_mut().enable();
 
-        if ACTIVE_SHIELDED_TASKS.load(Ordering::SeqCst) == 0 {
+        if ACTIVE_SHIELDED_TASKS.load(Ordering::Acquire) == 0 {
             return true;
         }
 
@@ -75,8 +75,9 @@ pub async fn wait_for_shielded_tasks(timeout: Duration) -> bool {
     }
 }
 
-/// Shields an asynchronous side-effect (such as Redis blacklist dual-write) from future cancellation,
-/// with a 3-attempt exponential backoff retry for transient failures only
+/// Shields an asynchronous side-effect (such as Redis blacklist dual-write) from future cancellation.
+///
+/// Uses a 3-attempt exponential backoff retry for transient failures only
 /// (`Internal`, `ServiceUnavailable`); deterministic errors are returned at once.
 ///
 /// Spawns the operation onto the Tokio runtime and awaits its completion.
@@ -88,8 +89,10 @@ pub async fn wait_for_shielded_tasks(timeout: Duration) -> bool {
 /// - Attempt 2: retried after 25ms delay.
 /// - Attempt 3: retried after 50ms delay.
 ///
-/// Returns the `Result<T, AppError>` produced by `op()`, or `AppError::Internal` if the
-/// background task panicked or was aborted (`tokio::task::JoinError`).
+/// # Errors
+///
+/// Returns any [`AppError`] produced by `op()` after retries are exhausted,
+/// or [`AppError::Internal`] if the background task panicked or was aborted (`tokio::task::JoinError`).
 pub async fn shielded<F, Fut, T>(mut op: F) -> Result<T, AppError>
 where
     F: FnMut() -> Fut + Send + 'static,

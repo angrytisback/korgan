@@ -26,7 +26,7 @@ pub enum AppEvent {
     SendVerificationEmail {
         /// Recipient email address.
         to: EmailAddress,
-        /// Raw Base64URL opaque verification token.
+        /// Raw `Base64URL` opaque verification token.
         token: String,
     },
 
@@ -34,7 +34,7 @@ pub enum AppEvent {
     SendPasswordResetEmail {
         /// Recipient email address.
         to: EmailAddress,
-        /// Raw Base64URL opaque password reset token.
+        /// Raw `Base64URL` opaque password reset token.
         token: String,
     },
 

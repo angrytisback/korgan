@@ -891,13 +891,13 @@ async fn create_auth_token(
     let claims = AccessTokenClaims {
         sub: user_id,
         sid: session_id,
-        iss: "http://localhost:8080".to_owned(),
-        aud: "korgan".to_owned(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: (now + chrono::Duration::hours(1)).timestamp(),
         iat: now.timestamp(),
         jti: Uuid::now_v7().to_string(),
         auth_time: session.created_at.timestamp(),
-        amr: vec!["passkey".to_string()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("passkey")],
     };
     let token = ctx.token_signer.sign_access_token(&claims)?;
     Ok(token)
@@ -1137,7 +1137,10 @@ async fn test_passkey_discoverable_login_and_cookie_issuance() -> TestResult {
         .and_then(|v| v.as_str())
         .ok_or("missing access token in response")?;
     let verified_claims = ctx.token_signer.verify_access_token(access_token_str)?;
-    assert_eq!(verified_claims.amr, vec!["passkey"]);
+    assert_eq!(
+        verified_claims.amr.as_slice(),
+        &[std::borrow::Cow::Borrowed("passkey")]
+    );
     assert!(verified_claims.auth_time > 0);
 
     // 6. Verify token refresh retains original auth_time and amr = ["passkey"]
@@ -1164,7 +1167,10 @@ async fn test_passkey_discoverable_login_and_cookie_issuance() -> TestResult {
         .and_then(|v| v.as_str())
         .ok_or("missing refreshed access token")?;
     let refreshed_claims = ctx.token_signer.verify_access_token(refreshed_at)?;
-    assert_eq!(refreshed_claims.amr, vec!["passkey"]);
+    assert_eq!(
+        refreshed_claims.amr.as_slice(),
+        &[std::borrow::Cow::Borrowed("passkey")]
+    );
     assert_eq!(refreshed_claims.auth_time, verified_claims.auth_time);
 
     Ok(())

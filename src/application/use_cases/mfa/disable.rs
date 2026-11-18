@@ -58,19 +58,16 @@ impl DisableTotpUseCase {
             .ok_or(AppError::Unauthenticated)?;
 
         let raw_password = RawPassword::new(&cmd.current_password)?;
-        let is_valid = match &user.password_hash {
-            Some(hash) => {
-                self.password_hasher
-                    .verify_password(&raw_password, hash)
-                    .await?
-            }
-            None => {
-                let _ = self
-                    .password_hasher
-                    .verify_against_dummy_hash(&raw_password)
-                    .await;
-                false
-            }
+        let is_valid = if let Some(hash) = &user.password_hash {
+            self.password_hasher
+                .verify_password(&raw_password, hash)
+                .await?
+        } else {
+            let _ = self
+                .password_hasher
+                .verify_against_dummy_hash(&raw_password)
+                .await;
+            false
         };
 
         if !is_valid {

@@ -37,7 +37,7 @@ impl std::fmt::Debug for EventWorker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EventWorker")
             .field("base_url", &self.base_url)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -160,13 +160,11 @@ impl EventWorker {
                     }
                 }
                 maybe_event = self.receiver.recv() => {
-                    match maybe_event {
-                        Some(event) => self.route_event(event, &mut mail_tasks, &mail_slots).await,
-                        None => {
-                            info!("event worker channel closed; stopping");
-                            break;
-                        }
-                    }
+                    let Some(event) = maybe_event else {
+                        info!("event worker channel closed; stopping");
+                        break;
+                    };
+                    self.route_event(event, &mut mail_tasks, &mail_slots).await;
                 }
             }
         }
@@ -245,6 +243,8 @@ impl EventWorker {
             return;
         };
         if let Ok(pending) = drain.outbox.pending().await {
+            // Prometheus gauges require f64; outbox backlog is well below 2^53 records.
+            #[allow(clippy::cast_precision_loss)]
             metrics::gauge!("korgan_audit_outbox_pending").set(pending as f64);
         }
     }
@@ -338,7 +338,7 @@ impl std::fmt::Debug for RetentionGcWorker {
             .field("interval", &self.interval)
             .field("batch_size", &self.batch_size)
             .field("unverified_retention", &self.unverified_retention)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -396,10 +396,8 @@ impl RetentionGcWorker {
         }
 
         // 2. Purge stale unverified user accounts
-        let cutoff_chrono = match chrono::Duration::from_std(self.unverified_retention) {
-            Ok(d) => d,
-            Err(_) => chrono::Duration::days(7),
-        };
+        let cutoff_chrono = chrono::Duration::from_std(self.unverified_retention)
+            .unwrap_or_else(|_| chrono::Duration::days(7));
         let cutoff = Utc::now() - cutoff_chrono;
 
         match self

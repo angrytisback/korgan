@@ -7,6 +7,7 @@ use validator::Validate;
 
 use crate::application::dto::{BanUserCommand, BanUserResult};
 use crate::application::error::AppError;
+use crate::application::use_cases::token_utils::{SESSION_BLACKLIST_TTL, blacklist_sessions};
 use crate::application::workers::EventBus;
 use crate::domain::entities::{AuditEventStatus, AuditLog};
 use crate::domain::value_objects::RequestId;
@@ -101,30 +102,11 @@ impl BanUserUseCase {
             .await?;
 
         // Sync the revoked sessions to the Redis blacklist.
-        let token_store = self.token_store.clone();
-        let entries: Vec<(String, &'static str, std::time::Duration)> = revoked_ids
-            .into_iter()
-            .map(|sid| {
-                (
-                    format!("blacklist:session:{sid}"),
-                    "revoked",
-                    std::time::Duration::from_secs(30 * 86400),
-                )
-            })
-            .collect();
-
-        crate::application::use_cases::shielded(move || {
-            let token_store = token_store.clone();
-            let entries = entries.clone();
-            async move {
-                let borrowed: Vec<(&str, &str, std::time::Duration)> = entries
-                    .iter()
-                    .map(|(k, v, ttl)| (k.as_str(), *v, *ttl))
-                    .collect();
-                token_store.set_tokens_batch(&borrowed).await?;
-                Ok(())
-            }
-        })
+        blacklist_sessions(
+            self.token_store.clone(),
+            &revoked_ids,
+            SESSION_BLACKLIST_TTL,
+        )
         .await?;
 
         Ok(BanUserResult {

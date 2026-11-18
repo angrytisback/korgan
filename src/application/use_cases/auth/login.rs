@@ -1,9 +1,11 @@
 //! Login use case implementation.
 
-use std::sync::Arc;
+use std::borrow::Cow;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use smallvec::smallvec;
 use validator::Validate;
 
 use crate::application::dto::{AuthTokensResult, LoginCommand, LoginOutcome, MfaChallengeResult};
@@ -11,11 +13,14 @@ use crate::application::error::AppError;
 use crate::application::use_cases::token_utils::generate_opaque_token;
 use crate::application::workers::EventBus;
 use crate::domain::entities::audit_events;
-use crate::domain::entities::{AuditEventStatus, AuditLog, Session};
-use crate::domain::value_objects::{EmailAddress, RawPassword};
+use crate::domain::entities::{AuditEventStatus, AuditLog, Session, User};
+use crate::domain::value_objects::{EmailAddress, RawPassword, UserId};
 use crate::ports::cache::{RateLimiterPort, TokenStore};
 use crate::ports::repositories::{SessionRepository, UserRepository};
 use crate::ports::services::{AccessTokenClaims, PasswordHasher, TokenSigner};
+
+static FALLBACK_DUMMY_PW: LazyLock<Option<RawPassword>> =
+    LazyLock::new(|| RawPassword::new("iam-dummy-password-fallback-timing").ok());
 
 /// Configuration options for the login workflow.
 #[derive(Debug, Clone)]
@@ -35,23 +40,23 @@ pub struct LoginConfig {
     /// Validity duration of ephemeral MFA challenge tickets.
     pub mfa_ticket_ttl: Duration,
     /// JWT issuer claim (`iss`).
-    pub jwt_issuer: String,
+    pub jwt_issuer: Cow<'static, str>,
     /// JWT audience claim (`aud`).
-    pub jwt_audience: String,
+    pub jwt_audience: Cow<'static, str>,
 }
 
 impl Default for LoginConfig {
     fn default() -> Self {
         Self {
             max_failed_attempts: 5,
-            lockout_duration: Duration::from_secs(15 * 60), // 15 mins
-            rate_limit_window: Duration::from_secs(60),     // 1 min
+            lockout_duration: Duration::from_mins(15),
+            rate_limit_window: Duration::from_secs(60),
             max_attempts_per_ip: 10,
-            access_token_ttl: Duration::from_secs(15 * 60), // 15 mins
-            refresh_token_ttl: Duration::from_secs(7 * 24 * 3600), // 7 days
-            mfa_ticket_ttl: Duration::from_secs(5 * 60),    // 5 mins
-            jwt_issuer: "https://auth.korgan.local".to_owned(),
-            jwt_audience: "korgan".to_owned(),
+            access_token_ttl: Duration::from_mins(15),
+            refresh_token_ttl: Duration::from_hours(168),
+            mfa_ticket_ttl: Duration::from_mins(5),
+            jwt_issuer: Cow::Borrowed("https://auth.korgan.local"),
+            jwt_audience: Cow::Borrowed("korgan"),
         }
     }
 }
@@ -73,7 +78,7 @@ impl std::fmt::Debug for LoginUseCase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoginUseCase")
             .field("config", &self.config)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -127,10 +132,28 @@ impl LoginUseCase {
         cmd.validate()?;
 
         let rate_limit_key = format!("login_ip:{}", cmd.ip_address);
+        self.check_rate_limit(&rate_limit_key, &cmd).await?;
+
+        let now = Utc::now();
+        let user = self.authenticate_user(&cmd, now).await?;
+
+        if user.mfa_enabled {
+            return self.issue_mfa_challenge(user.id, cmd).await;
+        }
+
+        self.create_session_and_tokens(user.id, cmd, &rate_limit_key, now)
+            .await
+    }
+
+    async fn check_rate_limit(
+        &self,
+        rate_limit_key: &str,
+        cmd: &LoginCommand,
+    ) -> Result<(), AppError> {
         let rate_status = self
             .rate_limiter
             .check_and_increment(
-                &rate_limit_key,
+                rate_limit_key,
                 self.config.max_attempts_per_ip,
                 self.config.rate_limit_window,
             )
@@ -154,6 +177,14 @@ impl LoginUseCase {
             });
         }
 
+        Ok(())
+    }
+
+    async fn authenticate_user(
+        &self,
+        cmd: &LoginCommand,
+        now: DateTime<Utc>,
+    ) -> Result<User, AppError> {
         let maybe_email = EmailAddress::parse(&cmd.email).ok();
         let maybe_password = RawPassword::new(&cmd.password).ok();
 
@@ -162,47 +193,80 @@ impl LoginUseCase {
             None => None,
         };
 
-        let fallback_dummy_pw = RawPassword::new("iam-dummy-password-fallback-timing").ok();
-
-        let mut user = match maybe_user {
-            Some(u) => u,
-            None => {
-                // Timing-Attack Mitigation: compute dummy hash verification so response latency
-                // is indistinguishable from an existing user's failed attempt.
-                let pw_for_dummy = maybe_password.as_ref().or(fallback_dummy_pw.as_ref());
-                if let Some(pw) = pw_for_dummy {
-                    let _ = self.password_hasher.verify_against_dummy_hash(pw).await;
-                }
-
-                self.event_bus
-                    .record_audit(AuditLog::new(
-                        None,
-                        Some(cmd.ip_address),
-                        cmd.user_agent,
-                        cmd.request_id,
-                        audit_events::LOGIN_FAILED,
-                        AuditEventStatus::Failure,
-                        serde_json::json!({ "reason": "user_not_found" }),
-                    ))
-                    .await;
-
-                return Err(AppError::InvalidCredentials);
+        let Some(user) = maybe_user else {
+            // Timing-Attack Mitigation: compute dummy hash verification so response latency
+            // is indistinguishable from an existing user's failed attempt.
+            let pw_for_dummy = maybe_password
+                .as_ref()
+                .or_else(|| FALLBACK_DUMMY_PW.as_ref());
+            if let Some(pw) = pw_for_dummy {
+                let _ = self.password_hasher.verify_against_dummy_hash(pw).await;
             }
+
+            self.event_bus
+                .record_audit(AuditLog::new(
+                    None,
+                    Some(cmd.ip_address),
+                    cmd.user_agent.clone(),
+                    cmd.request_id,
+                    audit_events::LOGIN_FAILED,
+                    AuditEventStatus::Failure,
+                    serde_json::json!({ "reason": "user_not_found" }),
+                ))
+                .await;
+
+            return Err(AppError::InvalidCredentials);
         };
 
-        let now = Utc::now();
+        self.verify_credentials_or_record_failure(&user, maybe_password.as_ref(), cmd, now)
+            .await?;
+
+        // Re-verify user status immediately after password verification to prevent
+        // race conditions where an administrative ban or status change occurred
+        // during the password hashing calculation.
+        let fresh_user = self
+            .user_repo
+            .find_by_id(&user.id)
+            .await?
+            .ok_or(AppError::InvalidCredentials)?;
+
+        if let Err(domain_err) = fresh_user.can_login(now) {
+            self.event_bus
+                .record_audit(AuditLog::new(
+                    Some(fresh_user.id),
+                    Some(cmd.ip_address),
+                    cmd.user_agent.clone(),
+                    cmd.request_id,
+                    audit_events::LOGIN_FAILED,
+                    AuditEventStatus::Blocked,
+                    serde_json::json!({ "reason": domain_err.to_string() }),
+                ))
+                .await;
+
+            return Err(AppError::from(domain_err));
+        }
+
+        Ok(fresh_user)
+    }
+
+    async fn verify_credentials_or_record_failure(
+        &self,
+        user: &User,
+        maybe_password: Option<&RawPassword>,
+        cmd: &LoginCommand,
+        now: DateTime<Utc>,
+    ) -> Result<(), AppError> {
         let can_login_res = user.can_login(now);
 
         // Always execute password verification or dummy hash verification to maintain strict timing parity.
-        let pw_ref = maybe_password.as_ref().or(fallback_dummy_pw.as_ref());
-        let is_password_valid = match (&maybe_password, &user.password_hash) {
+        let is_password_valid = match (maybe_password, &user.password_hash) {
             (Some(pw), Some(hash)) => self.password_hasher.verify_password(pw, hash).await?,
             (Some(pw), None) => {
                 let _ = self.password_hasher.verify_against_dummy_hash(pw).await;
                 false
             }
             (None, _) => {
-                if let Some(pw) = pw_ref {
+                if let Some(pw) = FALLBACK_DUMMY_PW.as_ref() {
                     let _ = self.password_hasher.verify_against_dummy_hash(pw).await;
                 }
                 false
@@ -214,7 +278,7 @@ impl LoginUseCase {
                 .record_audit(AuditLog::new(
                     Some(user.id),
                     Some(cmd.ip_address),
-                    cmd.user_agent,
+                    cmd.user_agent.clone(),
                     cmd.request_id,
                     audit_events::LOGIN_FAILED,
                     AuditEventStatus::Blocked,
@@ -230,7 +294,7 @@ impl LoginUseCase {
                 .record_audit(AuditLog::new(
                     Some(user.id),
                     Some(cmd.ip_address),
-                    cmd.user_agent,
+                    cmd.user_agent.clone(),
                     cmd.request_id,
                     audit_events::LOGIN_FAILED,
                     AuditEventStatus::Failure,
@@ -283,79 +347,65 @@ impl LoginUseCase {
             return Err(AppError::InvalidCredentials);
         }
 
-        // Re-verify user status immediately after password verification to prevent
-        // race conditions where an administrative ban or status change occurred
-        // during the password hashing calculation.
-        let fresh_user = self
-            .user_repo
-            .find_by_id(&user.id)
-            .await?
-            .ok_or(AppError::InvalidCredentials)?;
+        Ok(())
+    }
 
-        if let Err(domain_err) = fresh_user.can_login(now) {
-            self.event_bus
-                .record_audit(AuditLog::new(
-                    Some(fresh_user.id),
-                    Some(cmd.ip_address),
-                    cmd.user_agent,
-                    cmd.request_id,
-                    audit_events::LOGIN_FAILED,
-                    AuditEventStatus::Blocked,
-                    serde_json::json!({ "reason": domain_err.to_string() }),
-                ))
-                .await;
+    async fn issue_mfa_challenge(
+        &self,
+        user_id: UserId,
+        cmd: LoginCommand,
+    ) -> Result<LoginOutcome, AppError> {
+        let (raw_ticket, ticket_hash) = generate_opaque_token();
+        let ticket_key = format!("mfa_ticket:{ticket_hash}");
+        self.token_store
+            .set_token(
+                &ticket_key,
+                &user_id.to_string(),
+                self.config.mfa_ticket_ttl,
+            )
+            .await?;
 
-            return Err(AppError::from(domain_err));
-        }
-        user = fresh_user;
+        self.event_bus
+            .record_audit(AuditLog::new(
+                Some(user_id),
+                Some(cmd.ip_address),
+                cmd.user_agent,
+                cmd.request_id,
+                audit_events::MFA_CHALLENGED,
+                AuditEventStatus::Success,
+                serde_json::json!({ "mfa_type": "totp" }),
+            ))
+            .await;
 
-        // MFA check
-        if user.mfa_enabled {
-            let (raw_ticket, ticket_hash) = generate_opaque_token();
-            let ticket_key = format!("mfa_ticket:{ticket_hash}");
-            self.token_store
-                .set_token(
-                    &ticket_key,
-                    &user.id.to_string(),
-                    self.config.mfa_ticket_ttl,
-                )
-                .await?;
+        Ok(LoginOutcome::MfaRequired(MfaChallengeResult {
+            mfa_ticket: raw_ticket,
+            expires_in_secs: self.config.mfa_ticket_ttl.as_secs(),
+        }))
+    }
 
-            self.event_bus
-                .record_audit(AuditLog::new(
-                    Some(user.id),
-                    Some(cmd.ip_address),
-                    cmd.user_agent,
-                    cmd.request_id,
-                    audit_events::MFA_CHALLENGED,
-                    AuditEventStatus::Success,
-                    serde_json::json!({ "mfa_type": "totp" }),
-                ))
-                .await;
-
-            return Ok(LoginOutcome::MfaRequired(MfaChallengeResult {
-                mfa_ticket: raw_ticket,
-                expires_in_secs: self.config.mfa_ticket_ttl.as_secs(),
-            }));
-        }
-
-        // Issue Session and Tokens (MFA not enabled)
+    async fn create_session_and_tokens(
+        &self,
+        user_id: UserId,
+        cmd: LoginCommand,
+        rate_limit_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<LoginOutcome, AppError> {
         let (raw_refresh_token, refresh_token_hash) = generate_opaque_token();
         let refresh_chrono = chrono::Duration::from_std(self.config.refresh_token_ttl)
             .map_err(|e| AppError::internal("invalid refresh token duration configuration", e))?;
 
         let session = Session::new(
-            user.id,
+            user_id,
             refresh_token_hash,
             cmd.ip_address,
             cmd.user_agent.clone(),
             cmd.device_name,
             refresh_chrono,
         )
-        .with_amr(vec!["pwd".to_string()]);
+        .with_amr(smallvec![Cow::Borrowed("pwd")]);
 
         let audit = AuditLog::new(
-            Some(user.id),
+            Some(user_id),
             Some(cmd.ip_address),
             cmd.user_agent,
             cmd.request_id,
@@ -379,20 +429,22 @@ impl LoginUseCase {
                         })?;
                     // Atomically reset failed login attempts without mutating any
                     // other column (such as account status).
-                    self.user_repo.reset_failed_logins(&user.id, now).await?;
+                    self.user_repo.reset_failed_logins(&user_id, now).await?;
                     Ok::<(), AppError>(())
                 },
                 audit,
             )
             .await?;
-        let _ = self.rate_limiter.reset(&rate_limit_key).await;
+        let _ = self.rate_limiter.reset(rate_limit_key).await;
 
-        let exp = now.timestamp() + self.config.access_token_ttl.as_secs() as i64;
+        let access_ttl_secs =
+            i64::try_from(self.config.access_token_ttl.as_secs()).unwrap_or(i64::MAX);
         let iat = now.timestamp();
+        let exp = iat + access_ttl_secs;
         let jti = uuid::Uuid::now_v7().to_string();
 
         let claims = AccessTokenClaims {
-            sub: user.id,
+            sub: user_id,
             sid: session.id,
             iss: self.config.jwt_issuer.clone(),
             aud: self.config.jwt_audience.clone(),
@@ -409,7 +461,7 @@ impl LoginUseCase {
             access_token,
             refresh_token: raw_refresh_token,
             token_type: "Bearer",
-            expires_in: self.config.access_token_ttl.as_secs() as i64,
+            expires_in: access_ttl_secs,
             session_id: session.id,
         }))
     }

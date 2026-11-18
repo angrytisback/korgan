@@ -27,7 +27,7 @@ pub struct PasskeyRegistrationStartResult {
 pub struct PasskeyRegistrationFinishCommand {
     /// Challenge identifier obtained during registration start.
     pub challenge_id: Uuid,
-    /// Optional user-provided device label (e.g. "Work MacBook", "YubiKey 5C").
+    /// Optional user-provided device label (e.g. ``"Work MacBook"``, ``"YubiKey 5C"``).
     #[validate(length(
         min = 1,
         max = 100,

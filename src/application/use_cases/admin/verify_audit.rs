@@ -57,40 +57,46 @@ impl VerifyAuditChainUseCase {
     pub async fn execute(&self) -> Result<AuditVerificationResult, AppError> {
         let entries = self.audit_repo.list_all_chronological().await?;
 
-        let mut expected_prev: Option<&str> = None;
-        let mut prev_created_at: Option<DateTime<Utc>> = None;
+        tokio::task::spawn_blocking(move || {
+            let mut expected_prev: Option<&str> = None;
+            let mut prev_created_at: Option<DateTime<Utc>> = None;
 
-        for (idx, entry) in entries.iter().enumerate() {
-            if let Some(prev_time) = prev_created_at
-                && entry.created_at < prev_time
-            {
-                return Ok(AuditVerificationResult::Corrupted(BrokenAuditLink {
-                    record_index: idx,
-                    log_id: entry.id.to_string(),
-                    reason: format!(
-                        "Monotonic timestamp violation at record index {idx}: record timestamp {} is earlier than previous record timestamp {}",
-                        entry.created_at, prev_time
-                    ),
-                }));
+            for (idx, entry) in entries.iter().enumerate() {
+                if let Some(prev_time) = prev_created_at
+                    && entry.created_at < prev_time
+                {
+                    return Ok(AuditVerificationResult::Corrupted(BrokenAuditLink {
+                        record_index: idx,
+                        log_id: entry.id.to_string(),
+                        reason: format!(
+                            "Monotonic timestamp violation at record index {idx}: record timestamp {} is earlier than previous record timestamp {}",
+                            entry.created_at, prev_time
+                        ),
+                    }));
+                }
+
+                if !entry.verify_integrity(expected_prev) {
+                    return Ok(AuditVerificationResult::Corrupted(BrokenAuditLink {
+                        record_index: idx,
+                        log_id: entry.id.to_string(),
+                        reason: format!(
+                            "Hash mismatch or broken link at record index {idx}: expected prev_hash {:?}, recorded prev_hash {:?}",
+                            expected_prev, entry.prev_hash
+                        ),
+                    }));
+                }
+                expected_prev = entry.entry_hash.as_deref();
+                prev_created_at = Some(entry.created_at);
             }
 
-            if !entry.verify_integrity(expected_prev) {
-                return Ok(AuditVerificationResult::Corrupted(BrokenAuditLink {
-                    record_index: idx,
-                    log_id: entry.id.to_string(),
-                    reason: format!(
-                        "Hash mismatch or broken link at record index {idx}: expected prev_hash {:?}, recorded prev_hash {:?}",
-                        expected_prev, entry.prev_hash
-                    ),
-                }));
-            }
-            expected_prev = entry.entry_hash.as_deref();
-            prev_created_at = Some(entry.created_at);
-        }
+            let verified_count = entries.len();
+            // Prometheus gauges require f64; audit chains are well below 2^53 records.
+            #[allow(clippy::cast_precision_loss)]
+            metrics::gauge!("korgan_audit_chain_length").set(verified_count as f64);
 
-        let verified_count = entries.len();
-        metrics::gauge!("korgan_audit_chain_length").set(verified_count as f64);
-
-        Ok(AuditVerificationResult::Valid { verified_count })
+            Ok(AuditVerificationResult::Valid { verified_count })
+        })
+        .await
+        .map_err(|e| AppError::internal("audit chain verification task failed", e))?
     }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use validator::Validate;
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::application::dto::{EnableTotpCommand, TotpEnabledResult};
 use crate::application::error::AppError;
@@ -65,30 +65,26 @@ impl EnableTotpUseCase {
         let pending_key = format!("pending_totp:{}", cmd.user_id);
         let maybe_secret_str = self.token_store.get_token(&pending_key).await?;
 
-        let mut secret_str = match maybe_secret_str {
-            Some(s) => s,
-            None => return Err(AppError::TokenExpired),
+        let Some(secret_str) = maybe_secret_str.map(Zeroizing::new) else {
+            return Err(AppError::TokenExpired);
         };
 
-        let mut secret_bytes = match decode_base32(&secret_str) {
-            Some(b) => b,
-            None => {
-                secret_str.zeroize();
-                return Err(AppError::internal(
-                    "corrupt pending TOTP secret",
-                    std::io::Error::other("invalid base32"),
-                ));
-            }
+        let Some(secret_bytes) = decode_base32(&secret_str).map(Zeroizing::new) else {
+            return Err(AppError::internal(
+                "corrupt pending TOTP secret",
+                std::io::Error::other("invalid base32"),
+            ));
         };
+        // Zeroize and drop Base32 string immediately; it is not needed across .await.
+        drop(secret_str);
 
         let now = Utc::now();
-        let is_valid =
-            self.totp_service
-                .verify_code(&secret_bytes, &cmd.code, now.timestamp() as u64)?;
+        let now_secs = u64::try_from(now.timestamp()).unwrap_or(0);
+        let is_valid = self
+            .totp_service
+            .verify_code(&secret_bytes, &cmd.code, now_secs)?;
 
         if !is_valid {
-            secret_bytes.zeroize();
-            secret_str.zeroize();
             return Err(AppError::Validation(vec![FieldViolation::new(
                 "code",
                 "invalid TOTP code",
@@ -103,9 +99,8 @@ impl EnableTotpUseCase {
             .secret_cipher
             .encrypt_with_aad(&secret_bytes, cmd.user_id.as_bytes())?;
 
-        // Zeroize plaintext secrets in memory immediately after encryption
-        secret_bytes.zeroize();
-        secret_str.zeroize();
+        // Zeroize and drop plaintext secret bytes immediately after encryption.
+        drop(secret_bytes);
 
         // Generate 10 single-use backup codes
         let (plaintexts, hashes) = generate_backup_codes(10);

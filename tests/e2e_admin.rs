@@ -862,13 +862,13 @@ async fn test_rbac_and_admin_backoffice_flow() -> TestResult {
     let normal_claims = AccessTokenClaims {
         sub: normal_user_id,
         sid: normal_session_id,
-        iss: "http://localhost:8080".to_string(),
-        aud: "korgan".to_string(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 3600,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: normal_session.created_at.timestamp(),
-        amr: vec!["pwd".to_string()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let normal_access_token = ctx.token_signer.sign_access_token(&normal_claims)?;
 
@@ -899,13 +899,16 @@ async fn test_rbac_and_admin_backoffice_flow() -> TestResult {
     let admin_claims = AccessTokenClaims {
         sub: admin_user_id,
         sid: admin_session_id,
-        iss: "http://localhost:8080".to_string(),
-        aud: "korgan".to_string(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 3600,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: admin_session.created_at.timestamp(),
-        amr: vec!["pwd".to_string(), "mfa".to_string()],
+        amr: smallvec::smallvec![
+            std::borrow::Cow::Borrowed("pwd"),
+            std::borrow::Cow::Borrowed("mfa"),
+        ],
     };
     let admin_access_token = ctx.token_signer.sign_access_token(&admin_claims)?;
 

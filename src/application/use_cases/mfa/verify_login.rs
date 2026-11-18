@@ -1,9 +1,11 @@
 //! MFA challenge verification and token issuance use case.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use smallvec::smallvec;
 use validator::Validate;
 
 use crate::application::dto::{AuthTokensResult, VerifyMfaLoginCommand};
@@ -29,8 +31,8 @@ pub struct VerifyMfaLoginUseCase {
     event_bus: EventBus,
     access_token_ttl: Duration,
     refresh_token_ttl: Duration,
-    jwt_issuer: String,
-    jwt_audience: String,
+    jwt_issuer: Cow<'static, str>,
+    jwt_audience: Cow<'static, str>,
     max_failed_attempts: u16,
     lockout_duration: Duration,
 }
@@ -42,7 +44,7 @@ impl std::fmt::Debug for VerifyMfaLoginUseCase {
             .field("refresh_token_ttl", &self.refresh_token_ttl)
             .field("max_failed_attempts", &self.max_failed_attempts)
             .field("lockout_duration", &self.lockout_duration)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -60,8 +62,8 @@ impl VerifyMfaLoginUseCase {
         event_bus: EventBus,
         access_token_ttl: Duration,
         refresh_token_ttl: Duration,
-        jwt_issuer: String,
-        jwt_audience: String,
+        jwt_issuer: impl Into<Cow<'static, str>>,
+        jwt_audience: impl Into<Cow<'static, str>>,
         max_failed_attempts: u16,
         lockout_duration: Duration,
     ) -> Self {
@@ -75,8 +77,8 @@ impl VerifyMfaLoginUseCase {
             event_bus,
             access_token_ttl,
             refresh_token_ttl,
-            jwt_issuer,
-            jwt_audience,
+            jwt_issuer: jwt_issuer.into(),
+            jwt_audience: jwt_audience.into(),
             max_failed_attempts,
             lockout_duration,
         }
@@ -112,9 +114,8 @@ impl VerifyMfaLoginUseCase {
         let key = format!("mfa_ticket:{ticket_hash}");
 
         // Single-use: atomically retrieve and delete ticket
-        let user_id_str = match self.token_store.get_and_delete(&key).await? {
-            Some(s) => s,
-            None => return Err(AppError::TokenInvalid),
+        let Some(user_id_str) = self.token_store.get_and_delete(&key).await? else {
+            return Err(AppError::TokenInvalid);
         };
 
         let user_id: UserId = user_id_str
@@ -132,6 +133,21 @@ impl VerifyMfaLoginUseCase {
             return Err(AppError::from(domain_err));
         }
 
+        let verified = self.verify_second_factor(user.id, &cmd.code, now).await?;
+        if !verified {
+            self.record_mfa_failure(user.id, &cmd, now).await?;
+            return Err(AppError::InvalidCredentials);
+        }
+
+        self.issue_mfa_session_tokens(user.id, cmd, now).await
+    }
+
+    async fn verify_second_factor(
+        &self,
+        user_id: UserId,
+        code: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, AppError> {
         let maybe_mfa = self.user_repo.find_mfa(&user_id).await?;
         let mut mfa = match maybe_mfa {
             Some(m) if m.is_verified() => m,
@@ -139,103 +155,114 @@ impl VerifyMfaLoginUseCase {
         };
 
         // Verify either 6-digit TOTP or 8-char backup code
-        let verified = if cmd.code.len() == 6 {
-            let replay_key = format!("totp_used:{}:{}", user.id, cmd.code);
+        if code.len() == 6 {
+            let replay_key = format!("totp_used:{user_id}:{code}");
+            let now_secs = u64::try_from(now.timestamp()).unwrap_or(0);
             let ok = {
                 let secret_bytes = self.secret_cipher.decrypt_with_aad(
                     &mfa.totp_secret_ciphertext,
                     &mfa.totp_secret_nonce,
                     mfa.user_id.as_bytes(),
                 )?;
-                self.totp_service.verify_code(
-                    secret_bytes.as_bytes(),
-                    &cmd.code,
-                    now.timestamp() as u64,
-                )?
+                self.totp_service
+                    .verify_code(secret_bytes.as_bytes(), code, now_secs)?
             };
             if ok {
                 // Atomic SET NX lock prevents both concurrent parallel and sequential replay
-                self.token_store
+                Ok(self
+                    .token_store
                     .set_if_not_exists(&replay_key, "1", Duration::from_secs(120))
-                    .await?
+                    .await?)
             } else {
-                false
+                Ok(false)
             }
-        } else if cmd.code.len() == 8 {
-            let code_hash = hash_token(&cmd.code);
+        } else if code.len() == 8 {
+            let code_hash = hash_token(code);
             // Constant-time traversal across all 10 indices
             let in_memory_valid = mfa.consume_backup_code(&code_hash);
-            if !in_memory_valid {
-                false
-            } else {
+            if in_memory_valid {
                 // Atomic persistence-level CAS consumption prevents concurrent double-spending
-                self.user_repo
-                    .consume_backup_code(&user.id, &code_hash)
-                    .await?
+                Ok(self
+                    .user_repo
+                    .consume_backup_code(&user_id, &code_hash)
+                    .await?)
+            } else {
+                Ok(false)
             }
         } else {
-            false
-        };
-
-        if !verified {
-            let lockout_chrono = chrono::Duration::from_std(self.lockout_duration)
-                .map_err(|e| AppError::internal("invalid lockout duration configuration", e))?;
-            let lockout_until = now + lockout_chrono;
-            // The failed-attempt counter (and lockout) and its audit entry commit
-            // in ONE transaction.
-            let _ = self
-                .event_bus
-                .audited_with(
-                    async {
-                        let outcome = self
-                            .user_repo
-                            .record_failed_login_atomic(
-                                &user.id,
-                                self.max_failed_attempts,
-                                lockout_until,
-                                now,
-                            )
-                            .await?;
-                        Ok::<_, AppError>(outcome)
-                    },
-                    |(failed_attempts, locked_until)| {
-                        let is_locked = locked_until.is_some_and(|until| until > now);
-                        AuditLog::new(
-                            Some(user.id),
-                            Some(cmd.ip_address),
-                            cmd.user_agent.clone(),
-                            cmd.request_id,
-                            audit_events::LOGIN_FAILED,
-                            AuditEventStatus::Failure,
-                            serde_json::json!({
-                                "reason": "invalid_mfa_code",
-                                "failed_attempts": failed_attempts,
-                                "locked": is_locked
-                            }),
-                        )
-                    },
-                )
-                .await?;
-
-            return Err(AppError::InvalidCredentials);
+            Ok(false)
         }
+    }
 
-        // Verification succeeded: create session first, guarding against concurrent bans
+    async fn record_mfa_failure(
+        &self,
+        user_id: UserId,
+        cmd: &VerifyMfaLoginCommand,
+        now: DateTime<Utc>,
+    ) -> Result<(), AppError> {
+        let lockout_chrono = chrono::Duration::from_std(self.lockout_duration)
+            .map_err(|e| AppError::internal("invalid lockout duration configuration", e))?;
+        let lockout_until = now + lockout_chrono;
+        // The failed-attempt counter (and lockout) and its audit entry commit
+        // in ONE transaction.
+        let _ = self
+            .event_bus
+            .audited_with(
+                async {
+                    let outcome = self
+                        .user_repo
+                        .record_failed_login_atomic(
+                            &user_id,
+                            self.max_failed_attempts,
+                            lockout_until,
+                            now,
+                        )
+                        .await?;
+                    Ok::<_, AppError>(outcome)
+                },
+                |(failed_attempts, locked_until)| {
+                    let is_locked = locked_until.is_some_and(|until| until > now);
+                    AuditLog::new(
+                        Some(user_id),
+                        Some(cmd.ip_address),
+                        cmd.user_agent.clone(),
+                        cmd.request_id,
+                        audit_events::LOGIN_FAILED,
+                        AuditEventStatus::Failure,
+                        serde_json::json!({
+                            "reason": "invalid_mfa_code",
+                            "failed_attempts": failed_attempts,
+                            "locked": is_locked
+                        }),
+                    )
+                },
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn issue_mfa_session_tokens(
+        &self,
+        user_id: UserId,
+        cmd: VerifyMfaLoginCommand,
+        now: DateTime<Utc>,
+    ) -> Result<AuthTokensResult, AppError> {
         let (raw_refresh_token, refresh_token_hash) = generate_opaque_token();
         let refresh_chrono = chrono::Duration::from_std(self.refresh_token_ttl)
             .map_err(|e| AppError::internal("invalid refresh token duration configuration", e))?;
 
         let session = Session::new(
-            user.id,
+            user_id,
             refresh_token_hash,
             cmd.ip_address,
             cmd.user_agent.clone(),
             cmd.device_name,
             refresh_chrono,
         )
-        .with_amr(vec!["pwd".to_string(), "mfa".to_string()]);
+        .with_amr(smallvec![Cow::Borrowed("pwd"), Cow::Borrowed("mfa")]);
         let audit = AuditLog::new(
-            Some(user.id),
+            Some(user_id),
             Some(cmd.ip_address),
             cmd.user_agent,
             cmd.request_id,
@@ -256,19 +283,20 @@ impl VerifyMfaLoginUseCase {
                             crate::ports::PortError::Conflict { .. } => AppError::Forbidden,
                             other => AppError::from(other),
                         })?;
-                    self.user_repo.reset_failed_logins(&user.id, now).await?;
+                    self.user_repo.reset_failed_logins(&user_id, now).await?;
                     Ok::<(), AppError>(())
                 },
                 audit,
             )
             .await?;
 
-        let exp = now.timestamp() + self.access_token_ttl.as_secs() as i64;
+        let access_ttl_secs = i64::try_from(self.access_token_ttl.as_secs()).unwrap_or(i64::MAX);
         let iat = now.timestamp();
+        let exp = iat + access_ttl_secs;
         let jti = uuid::Uuid::now_v7().to_string();
 
         let claims = AccessTokenClaims {
-            sub: user.id,
+            sub: user_id,
             sid: session.id,
             iss: self.jwt_issuer.clone(),
             aud: self.jwt_audience.clone(),
@@ -285,7 +313,7 @@ impl VerifyMfaLoginUseCase {
             access_token,
             refresh_token: raw_refresh_token,
             token_type: "Bearer",
-            expires_in: self.access_token_ttl.as_secs() as i64,
+            expires_in: access_ttl_secs,
             session_id: session.id,
         })
     }

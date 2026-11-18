@@ -330,7 +330,7 @@ pub trait PasskeyRepository: Send + Sync + 'static {
         user_id: &UserId,
     ) -> Result<bool, PortError>;
 
-    /// Atomically updates the passkey's serialized credential state (`passkey_json` counter/sign_count)
+    /// Atomically updates the passkey's serialized credential state (`passkey_json` `counter`/`sign_count`)
     /// and `last_used_at` timestamp upon successful authentication ceremony to prevent hardware key cloning.
     async fn update_credential_state(
         &self,

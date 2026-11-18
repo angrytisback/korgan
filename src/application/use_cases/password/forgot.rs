@@ -31,7 +31,7 @@ impl std::fmt::Debug for ForgotPasswordUseCase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ForgotPasswordUseCase")
             .field("reset_token_ttl", &self.reset_token_ttl)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

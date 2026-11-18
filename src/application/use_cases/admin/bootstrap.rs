@@ -74,7 +74,7 @@ impl BootstrapSuperadminUseCase {
         let password_hash = self.password_hasher.hash_password(&raw_pw).await?;
 
         let now = Utc::now();
-        let mut user = User::with_password(email_addr.clone(), None, password_hash);
+        let mut user = User::with_password(email_addr, None, password_hash);
         user.role = UserRole::Superadmin;
         user.status = AccountStatus::Active;
         user.email_verified_at = Some(now);
