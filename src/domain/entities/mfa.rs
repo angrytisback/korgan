@@ -15,6 +15,84 @@ pub const MAX_BACKUP_CODES: usize = 10;
 const DUMMY_BACKUP_HASH: &[u8] =
     b"0000000000000000000000000000000000000000000000000000000000000000";
 
+/// 12-byte nonce used during AES-256-GCM encryption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct AesNonce(pub [u8; 12]);
+
+impl AesNonce {
+    /// Constructs a new [`AesNonce`] from an inline 12-byte array.
+    #[inline]
+    #[must_use]
+    pub const fn new(bytes: [u8; 12]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns a slice view of the 12-byte nonce.
+    #[inline]
+    #[must_use]
+    pub const fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Returns the underlying 12-byte array.
+    #[inline]
+    #[must_use]
+    pub const fn into_inner(self) -> [u8; 12] {
+        self.0
+    }
+}
+
+impl AsRef<[u8]> for AesNonce {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for AesNonce {
+    type Target = [u8; 12];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<[u8; 12]> for AesNonce {
+    #[inline]
+    fn from(arr: [u8; 12]) -> Self {
+        Self(arr)
+    }
+}
+
+impl From<&[u8; 12]> for AesNonce {
+    #[inline]
+    fn from(arr: &[u8; 12]) -> Self {
+        Self(*arr)
+    }
+}
+
+impl From<Vec<u8>> for AesNonce {
+    #[inline]
+    fn from(vec: Vec<u8>) -> Self {
+        let mut arr = [0u8; 12];
+        let len = vec.len().min(12);
+        arr[..len].copy_from_slice(&vec[..len]);
+        Self(arr)
+    }
+}
+
+impl From<&[u8]> for AesNonce {
+    #[inline]
+    fn from(slice: &[u8]) -> Self {
+        let mut arr = [0u8; 12];
+        let len = slice.len().min(12);
+        arr[..len].copy_from_slice(&slice[..len]);
+        Self(arr)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserMfa {
     /// Owner user identifier.
@@ -24,7 +102,7 @@ pub struct UserMfa {
     /// AES-256-GCM ciphertext containing the TOTP secret.
     pub totp_secret_ciphertext: Vec<u8>,
     /// 12-byte nonce used during encryption.
-    pub totp_secret_nonce: Vec<u8>,
+    pub totp_secret_nonce: [u8; 12],
     /// SHA-256 hex hashes of unused single-use 8-character backup codes.
     pub backup_code_hashes: Vec<String>,
     /// Timestamp when TOTP was successfully verified during initial enrollment.
@@ -48,12 +126,12 @@ impl std::fmt::Debug for UserMfa {
 }
 
 impl UserMfa {
-    /// Creates a new unverified MFA enrollment record defaulting to key_id "v1".
+    /// Creates a new unverified MFA enrollment record defaulting to `key_id` `"v1"`.
     #[must_use]
     pub fn new(
         user_id: UserId,
         totp_secret_ciphertext: Vec<u8>,
-        totp_secret_nonce: Vec<u8>,
+        totp_secret_nonce: impl Into<AesNonce>,
         backup_code_hashes: Vec<String>,
     ) -> Self {
         Self::new_with_key_id(
@@ -71,14 +149,14 @@ impl UserMfa {
         user_id: UserId,
         key_id: impl Into<String>,
         totp_secret_ciphertext: Vec<u8>,
-        totp_secret_nonce: Vec<u8>,
+        totp_secret_nonce: impl Into<AesNonce>,
         backup_code_hashes: Vec<String>,
     ) -> Self {
         Self {
             user_id,
             key_id: key_id.into(),
             totp_secret_ciphertext,
-            totp_secret_nonce,
+            totp_secret_nonce: totp_secret_nonce.into().0,
             backup_code_hashes,
             verified_at: None,
             updated_at: Utc::now(),
@@ -86,13 +164,15 @@ impl UserMfa {
     }
 
     /// Returns `true` if this MFA configuration has completed initial verification.
+    #[inline]
     #[must_use]
-    pub fn is_verified(&self) -> bool {
+    pub const fn is_verified(&self) -> bool {
         self.verified_at.is_some()
     }
 
     /// Marks the MFA configuration as verified upon successful TOTP challenge.
-    pub fn verify(&mut self, now: DateTime<Utc>) {
+    #[inline]
+    pub const fn verify(&mut self, now: DateTime<Utc>) {
         self.verified_at = Some(now);
         self.updated_at = now;
     }
@@ -101,7 +181,7 @@ impl UserMfa {
     ///
     /// Even if fewer than 10 backup codes remain, this method always iterates through
     /// exactly 10 comparisons using constant-time equality comparisons to eliminate timing leaks.
-    /// If found, the code is removed from the active list and `true` is returned.
+    /// If found, the code is removed from the active list in O(1) via `swap_remove` and `true` is returned.
     pub fn consume_backup_code(&mut self, candidate_hash: &str) -> bool {
         let candidate_bytes = candidate_hash.as_bytes();
         let mut matched_index = None;
@@ -120,7 +200,7 @@ impl UserMfa {
         }
 
         if let Some(index) = matched_index {
-            self.backup_code_hashes.remove(index);
+            self.backup_code_hashes.swap_remove(index);
             self.updated_at = Utc::now();
             true
         } else {
@@ -129,12 +209,14 @@ impl UserMfa {
     }
 
     /// Returns the number of remaining unused backup codes.
+    #[inline]
     #[must_use]
-    pub fn remaining_backup_codes_count(&self) -> usize {
+    pub const fn remaining_backup_codes_count(&self) -> usize {
         self.backup_code_hashes.len()
     }
 
     /// Replaces active backup code hashes with fresh ones.
+    #[inline]
     pub fn regenerate_backup_codes(&mut self, new_hashes: Vec<String>, now: DateTime<Utc>) {
         self.backup_code_hashes = new_hashes;
         self.updated_at = now;
@@ -219,5 +301,34 @@ mod tests {
         assert_eq!(deserialized.totp_secret_ciphertext, ciphertext);
 
         Ok(())
+    }
+
+    #[test]
+    fn aes_nonce_conversions_and_swap_remove_order() {
+        let raw = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let nonce = AesNonce::new(raw);
+        assert_eq!(nonce.as_slice(), &raw);
+        assert_eq!(nonce.into_inner(), raw);
+        assert_eq!(nonce.as_ref(), &raw);
+        assert_eq!(*nonce, raw);
+
+        let from_vec = AesNonce::from(vec![1, 2, 3]);
+        assert_eq!(from_vec.0[0..3], [1, 2, 3]);
+        assert_eq!(from_vec.0[3..12], [0; 9]);
+
+        let user_id = UserId::new();
+        let mut mfa = UserMfa::new(
+            user_id,
+            vec![1, 2, 3],
+            raw,
+            vec!["h0".to_owned(), "h1".to_owned(), "h2".to_owned()],
+        );
+        assert_eq!(mfa.totp_secret_nonce, raw);
+
+        // When h0 is consumed with swap_remove, the last element ("h2") moves to index 0
+        assert!(mfa.consume_backup_code("h0"));
+        assert_eq!(mfa.backup_code_hashes.len(), 2);
+        assert_eq!(mfa.backup_code_hashes[0], "h2");
+        assert_eq!(mfa.backup_code_hashes[1], "h1");
     }
 }

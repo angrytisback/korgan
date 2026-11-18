@@ -1,12 +1,49 @@
 //! Immutable audit trail domain model.
 
-use std::fmt;
+use std::fmt::{self, Write};
 use std::net::IpAddr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::domain::value_objects::{AuditLogId, RequestId, UserId};
+
+/// Hex characters lookup table for zero-allocation hexadecimal formatting.
+const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+
+/// Stack-allocated buffer for zero-allocation `fmt::Write` formatting.
+struct StackBuf<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+impl fmt::Write for StackBuf<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let bytes = s.as_bytes();
+        let remain = self.buf.len().saturating_sub(self.len);
+        if bytes.len() > remain {
+            return Err(fmt::Error);
+        }
+        self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+        Ok(())
+    }
+}
+
+/// Writer adapter routing `std::io::Write` streaming directly into a cryptographic hasher.
+struct HasherWriter<'a, H: Digest>(&'a mut H);
+
+impl<H: Digest> std::io::Write for HasherWriter<'_, H> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Status of the audited security event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -22,6 +59,7 @@ pub enum AuditEventStatus {
 
 impl AuditEventStatus {
     /// Returns the static string representation.
+    #[inline]
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -81,7 +119,7 @@ pub mod audit_events {
 /// Immutable security audit log entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditLog {
-    /// Unique audit log record identifier (UUIDv7).
+    /// Unique audit log record identifier (`UUIDv7`).
     pub id: AuditLogId,
     /// Actor user identifier, if authenticated or known.
     pub user_id: Option<UserId>,
@@ -132,15 +170,26 @@ impl AuditLog {
         }
     }
 
-    /// Computes the cryptographic SHA-256 entry hash linking to the optional previous entry hash.
-    ///
-    /// Prepends the domain separator `b"KORGAN_AUDIT_V1\0"` and inserts canonical `b"|"` delimiters
-    /// between each field slot:
-    /// `prev_hash | entry_id | user_id | actor_ip | user_agent | request_id | event_type | event_status | created_at | details`
-    /// to prevent hash extension and collision attacks caused by variable-length or empty fields.
+    /// Returns zero-copy byte slice of the previous audit hash, if present.
+    #[inline]
     #[must_use]
-    pub fn compute_entry_hash(&self, prev_hash: Option<&str>) -> String {
-        use sha2::{Digest, Sha256};
+    pub fn prev_hash_bytes(&self) -> Option<&[u8]> {
+        self.prev_hash.as_deref().map(str::as_bytes)
+    }
+
+    /// Returns zero-copy byte slice of the entry hash, if present.
+    #[inline]
+    #[must_use]
+    pub fn entry_hash_bytes(&self) -> Option<&[u8]> {
+        self.entry_hash.as_deref().map(str::as_bytes)
+    }
+
+    /// Computes the raw 32-byte cryptographic SHA-256 entry hash digest linking to `prev_hash`.
+    ///
+    /// Avoids intermediate heap string allocations by encoding UUIDs, timestamps, IPs,
+    /// and JSON metadata directly into stack buffers and streaming directly into the hasher.
+    #[must_use]
+    pub fn compute_entry_hash_raw(&self, prev_hash: Option<&str>) -> [u8; 32] {
         let mut hasher = Sha256::new();
 
         // Cryptographic domain separator
@@ -151,16 +200,25 @@ impl AuditLog {
         hasher.update(prev_val.as_bytes());
         hasher.update(b"|");
 
-        hasher.update(self.id.to_string().as_bytes());
+        let mut id_scratch = [0u8; 36];
+        let id_str = self.id.as_uuid().hyphenated().encode_lower(&mut id_scratch);
+        hasher.update(id_str.as_bytes());
         hasher.update(b"|");
 
         if let Some(uid) = self.user_id {
-            hasher.update(uid.to_string().as_bytes());
+            let uid_str = uid.as_uuid().hyphenated().encode_lower(&mut id_scratch);
+            hasher.update(uid_str.as_bytes());
         }
         hasher.update(b"|");
 
         if let Some(ip) = self.actor_ip {
-            hasher.update(ip.to_string().as_bytes());
+            let mut ip_buf = [0u8; 64];
+            let mut writer = StackBuf {
+                buf: &mut ip_buf,
+                len: 0,
+            };
+            let _ = write!(writer, "{ip}");
+            hasher.update(&writer.buf[..writer.len]);
         }
         hasher.update(b"|");
 
@@ -169,7 +227,12 @@ impl AuditLog {
         }
         hasher.update(b"|");
 
-        hasher.update(self.request_id.to_string().as_bytes());
+        let req_str = self
+            .request_id
+            .as_uuid()
+            .hyphenated()
+            .encode_lower(&mut id_scratch);
+        hasher.update(req_str.as_bytes());
         hasher.update(b"|");
 
         hasher.update(self.event_type.as_bytes());
@@ -178,24 +241,49 @@ impl AuditLog {
         hasher.update(self.event_status.as_str().as_bytes());
         hasher.update(b"|");
 
-        hasher.update(self.created_at.timestamp().to_string().as_bytes());
+        let mut ts_buf = [0u8; 32];
+        let mut writer = StackBuf {
+            buf: &mut ts_buf,
+            len: 0,
+        };
+        let _ = write!(writer, "{}", self.created_at.timestamp());
+        hasher.update(&writer.buf[..writer.len]);
         hasher.update(b"|");
 
-        let meta_str = self.metadata.to_string();
-        hasher.update(meta_str.as_bytes());
+        let _ = serde_json::to_writer(HasherWriter(&mut hasher), &self.metadata);
 
-        let digest = hasher.finalize();
-        use std::fmt::Write;
-        let mut hex = String::with_capacity(64);
-        for byte in digest {
-            let _ = write!(hex, "{byte:02x}");
+        hasher.finalize().into()
+    }
+
+    /// Computes the cryptographic SHA-256 entry hash as a fixed-size 64-byte ASCII hexadecimal array.
+    ///
+    /// Completely allocation-free.
+    #[must_use]
+    pub fn compute_entry_hash_hex(&self, prev_hash: Option<&str>) -> [u8; 64] {
+        let digest = self.compute_entry_hash_raw(prev_hash);
+        let mut hex = [0u8; 64];
+        for (i, &b) in digest.iter().enumerate() {
+            hex[i * 2] = HEX_CHARS[(b >> 4) as usize];
+            hex[i * 2 + 1] = HEX_CHARS[(b & 0x0f) as usize];
         }
         hex
     }
 
+    /// Computes the cryptographic SHA-256 entry hash linking to the optional previous entry hash.
+    ///
+    /// Prepends the domain separator `b"KORGAN_AUDIT_V1\0"` and inserts canonical `b"|"` delimiters
+    /// between each field slot:
+    /// `prev_hash | entry_id | user_id | actor_ip | user_agent | request_id | event_type | event_status | created_at | details`
+    /// to prevent hash extension and collision attacks caused by variable-length or empty fields.
+    #[must_use]
+    pub fn compute_entry_hash(&self, prev_hash: Option<&str>) -> String {
+        let hex = self.compute_entry_hash_hex(prev_hash);
+        std::str::from_utf8(&hex).unwrap_or_default().to_owned()
+    }
+
     /// Chains this audit log to the given previous hash by populating `prev_hash` and `entry_hash`.
     pub fn chain_to(&mut self, prev_hash: Option<&str>) {
-        self.prev_hash = prev_hash.map(|s| s.to_owned());
+        self.prev_hash = prev_hash.map(ToOwned::to_owned);
         self.entry_hash = Some(self.compute_entry_hash(prev_hash));
     }
 
@@ -206,18 +294,16 @@ impl AuditLog {
     }
 
     /// Verifies the cryptographic integrity of this audit log entry.
+    #[inline]
     #[must_use]
     pub fn verify_integrity(&self, expected_prev_hash: Option<&str>) -> bool {
         if self.prev_hash.as_deref() != expected_prev_hash {
             return false;
         }
-        match &self.entry_hash {
-            Some(entry_hash) => {
-                let computed = self.compute_entry_hash(expected_prev_hash);
-                subtle::ConstantTimeEq::ct_eq(entry_hash.as_bytes(), computed.as_bytes()).into()
-            }
-            None => false,
-        }
+        self.entry_hash.as_ref().is_some_and(|entry_hash| {
+            let computed = self.compute_entry_hash_hex(expected_prev_hash);
+            subtle::ConstantTimeEq::ct_eq(entry_hash.as_bytes(), &computed).into()
+        })
     }
 }
 
@@ -327,5 +413,40 @@ mod tests {
         );
         let hash = entry.compute_entry_hash(None);
         assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_audit_hash_zero_copy_and_raw_hex_representation() {
+        let req_id = RequestId::new();
+        let user_id = UserId::new();
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
+        let mut entry = AuditLog::new(
+            Some(user_id),
+            Some(ip),
+            Some("agent/1.0".to_owned()),
+            req_id,
+            audit_events::LOGIN_SUCCESS,
+            AuditEventStatus::Success,
+            serde_json::json!({ "session": "123" }),
+        );
+
+        assert_eq!(entry.prev_hash_bytes(), None);
+        assert_eq!(entry.entry_hash_bytes(), None);
+
+        let prev = "prev_sha256_hash";
+        let raw = entry.compute_entry_hash_raw(Some(prev));
+        assert_eq!(raw.len(), 32);
+
+        let hex = entry.compute_entry_hash_hex(Some(prev));
+        assert_eq!(hex.len(), 64);
+
+        let s = entry.compute_entry_hash(Some(prev));
+        assert_eq!(s.as_bytes(), &hex);
+
+        entry.chain_to(Some(prev));
+        assert_eq!(entry.prev_hash_bytes(), Some(prev.as_bytes()));
+        assert_eq!(entry.entry_hash_bytes(), Some(s.as_bytes()));
+        assert!(entry.verify_integrity(Some(prev)));
+        assert!(!entry.verify_integrity(Some("tampered_prev")));
     }
 }

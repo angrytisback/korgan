@@ -27,6 +27,7 @@ pub enum AccountStatus {
 
 impl AccountStatus {
     /// Returns the static string representation.
+    #[inline]
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -60,6 +61,7 @@ pub enum UserRole {
 
 impl UserRole {
     /// Returns the static string representation.
+    #[inline]
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -70,6 +72,7 @@ impl UserRole {
     }
 
     /// Returns true if this role has administrative privileges.
+    #[inline]
     #[must_use]
     pub const fn is_admin(&self) -> bool {
         matches!(self, Self::Admin | Self::Superadmin)
@@ -85,7 +88,7 @@ impl fmt::Display for UserRole {
 /// Core User entity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
-    /// Unique identifier (always UUIDv7 upon creation).
+    /// Unique identifier (always `UUIDv7` upon creation).
     pub id: UserId,
     /// Canonical lowercase e-mail address.
     pub email: EmailAddress,
@@ -150,6 +153,7 @@ impl User {
     }
 
     /// Checks if the account is currently locked out against `now`.
+    #[inline]
     #[must_use]
     pub fn is_locked(&self, now: DateTime<Utc>) -> bool {
         self.locked_until.is_some_and(|until| until > now)
@@ -161,6 +165,7 @@ impl User {
     ///
     /// Returns [`DomainError::AccountLocked`] if temporarily locked, or
     /// [`DomainError::AccountNotActive`] if status is not `Active`.
+    #[inline]
     pub fn can_login(&self, now: DateTime<Utc>) -> Result<(), DomainError> {
         if let Some(until) = self.locked_until
             && until > now
@@ -171,12 +176,13 @@ impl User {
         match self.status {
             AccountStatus::Active => Ok(()),
             other => Err(DomainError::AccountNotActive {
-                status: other.to_string(),
+                status: other.as_str(),
             }),
         }
     }
 
     /// Records a failed login attempt, applying a lockout if threshold is exceeded.
+    #[inline]
     pub fn record_failed_login(
         &mut self,
         max_attempts: u16,
@@ -191,13 +197,15 @@ impl User {
     }
 
     /// Resets failed login counters and lockout upon successful login.
-    pub fn record_successful_login(&mut self, now: DateTime<Utc>) {
+    #[inline]
+    pub const fn record_successful_login(&mut self, now: DateTime<Utc>) {
         self.failed_login_attempts = 0;
         self.locked_until = None;
         self.updated_at = now;
     }
 
     /// Confirms the user's e-mail address and activates the account if unverified.
+    #[inline]
     pub fn verify_email(&mut self, now: DateTime<Utc>) {
         self.email_verified_at = Some(now);
         if self.status == AccountStatus::Unverified {
@@ -207,18 +215,21 @@ impl User {
     }
 
     /// Enables MFA on the account.
-    pub fn enable_mfa(&mut self, now: DateTime<Utc>) {
+    #[inline]
+    pub const fn enable_mfa(&mut self, now: DateTime<Utc>) {
         self.mfa_enabled = true;
         self.updated_at = now;
     }
 
     /// Disables MFA on the account.
-    pub fn disable_mfa(&mut self, now: DateTime<Utc>) {
+    #[inline]
+    pub const fn disable_mfa(&mut self, now: DateTime<Utc>) {
         self.mfa_enabled = false;
         self.updated_at = now;
     }
 
     /// Updates password hash and updates `updated_at`.
+    #[inline]
     pub fn change_password(&mut self, new_hash: PasswordHash, now: DateTime<Utc>) {
         self.password_hash = Some(new_hash);
         self.failed_login_attempts = 0;
@@ -227,6 +238,7 @@ impl User {
     }
 
     /// Schedules account deletion after a grace period.
+    #[inline]
     pub fn schedule_deletion(&mut self, grace_period: Duration, now: DateTime<Utc>) {
         self.status = AccountStatus::PendingDeletion;
         self.deletion_scheduled_at = Some(now + grace_period);
@@ -234,6 +246,7 @@ impl User {
     }
 
     /// Cancels scheduled deletion and restores active status.
+    #[inline]
     pub fn cancel_deletion(&mut self, now: DateTime<Utc>) {
         if self.status == AccountStatus::PendingDeletion {
             self.status = AccountStatus::Active;
@@ -243,13 +256,15 @@ impl User {
     }
 
     /// Administratively bans the account, marking its status as Suspended.
-    pub fn ban(&mut self, now: DateTime<Utc>) {
+    #[inline]
+    pub const fn ban(&mut self, now: DateTime<Utc>) {
         self.status = AccountStatus::Suspended;
         self.updated_at = now;
     }
 
     /// Restores a suspended account to Active status.
-    pub fn unban(&mut self, now: DateTime<Utc>) {
+    #[inline]
+    pub const fn unban(&mut self, now: DateTime<Utc>) {
         self.status = AccountStatus::Active;
         self.updated_at = now;
     }

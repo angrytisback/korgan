@@ -1,4 +1,4 @@
-//! External OAuth2 account linkage domain entity and provider taxonomy.
+//! External `OAuth2` account linkage domain entity and provider taxonomy.
 
 use std::fmt;
 use std::str::FromStr;
@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use crate::domain::errors::DomainError;
 use crate::domain::value_objects::{OAuthAccountId, UserId};
 
-/// Supported external OAuth2 / OIDC identity providers.
+/// Supported external `OAuth2` / OIDC identity providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OAuthProvider {
-    /// Google Identity Services / OpenID Connect.
+    /// Google Identity Services / `OpenID` Connect.
     Google,
     /// GitHub OAuth Apps.
     GitHub,
@@ -21,6 +21,7 @@ pub enum OAuthProvider {
 
 impl OAuthProvider {
     /// Canonical lowercase string identifier matching database representation.
+    #[inline]
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -34,13 +35,16 @@ impl OAuthProvider {
     /// # Errors
     ///
     /// Returns [`DomainError::InvalidOAuthProvider`] if the string does not match a known provider.
+    #[inline]
     pub fn parse(s: &str) -> Result<Self, DomainError> {
-        match s.to_ascii_lowercase().as_str() {
-            "google" => Ok(Self::Google),
-            "github" => Ok(Self::GitHub),
-            other => Err(DomainError::InvalidOAuthProvider {
-                provider: other.to_owned(),
-            }),
+        if s.eq_ignore_ascii_case("google") {
+            Ok(Self::Google)
+        } else if s.eq_ignore_ascii_case("github") {
+            Ok(Self::GitHub)
+        } else {
+            Err(DomainError::InvalidOAuthProvider {
+                provider: s.to_owned(),
+            })
         }
     }
 }
@@ -54,6 +58,7 @@ impl fmt::Display for OAuthProvider {
 impl FromStr for OAuthProvider {
     type Err = DomainError;
 
+    #[inline]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::parse(s)
     }
@@ -62,7 +67,7 @@ impl FromStr for OAuthProvider {
 /// Links an internal [`User`](crate::domain::entities::User) account to an external Identity Provider account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthAccount {
-    /// Unique identifier for this linkage record (RFC 9562 UUIDv7).
+    /// Unique identifier for this linkage record (RFC 9562 `UUIDv7`).
     pub id: OAuthAccountId,
     /// Internal user account ID.
     pub user_id: UserId,

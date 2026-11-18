@@ -1,5 +1,7 @@
 //! Pure domain errors. No I/O, no framework types.
 
+use std::borrow::Cow;
+
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
@@ -14,6 +16,7 @@ pub struct FieldViolation {
 
 impl FieldViolation {
     /// Creates a violation for `field` with the given `reason`.
+    #[inline]
     pub fn new(field: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
             field: field.into(),
@@ -40,7 +43,7 @@ pub enum DomainError {
     #[error("invalid e-mail address: {reason}")]
     InvalidEmail {
         /// Explanation of the invalidity.
-        reason: String,
+        reason: Cow<'static, str>,
     },
 
     /// Password is too short (NIST SP 800-63B requires at least 8 characters).
@@ -93,7 +96,7 @@ pub enum DomainError {
     #[error("account is not active (status: {status})")]
     AccountNotActive {
         /// Current account status.
-        status: String,
+        status: &'static str,
     },
 
     /// The session has expired.
@@ -144,6 +147,8 @@ pub enum DomainError {
 
 impl DomainError {
     /// Extracts field violations associated with this domain error, if applicable.
+    #[inline]
+    #[must_use]
     pub fn field_violations(&self) -> Vec<FieldViolation> {
         match self {
             Self::Validation(violations) => violations.clone(),
@@ -151,7 +156,7 @@ impl DomainError {
                 vec![FieldViolation::new(*kind, "must be a valid, non-nil UUID")]
             }
             Self::InvalidEmail { reason } => {
-                vec![FieldViolation::new("email", reason.clone())]
+                vec![FieldViolation::new("email", reason.as_ref())]
             }
             Self::PasswordTooShort { min, actual } => {
                 vec![FieldViolation::new(
