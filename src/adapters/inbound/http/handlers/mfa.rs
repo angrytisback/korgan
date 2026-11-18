@@ -11,7 +11,7 @@ use utoipa::ToSchema;
 
 use super::auth::MessageResponse;
 use crate::adapters::inbound::http::error::{ApiError, ProblemDetails};
-use crate::adapters::inbound::http::extractors::{AuthUser, ClientMetadata, StepUpUser};
+use crate::adapters::inbound::http::extractors::{ClientMetadata, StepUpUser};
 use crate::adapters::inbound::http::state::AppState;
 use crate::application::dto::{DisableTotpCommand, EnableTotpCommand, SetupTotpCommand};
 
@@ -104,7 +104,7 @@ impl std::fmt::Debug for DisableTotpRequest {
 )]
 pub async fn setup(
     State(state): State<AppState>,
-    auth_user: AuthUser,
+    auth_user: StepUpUser,
     metadata: ClientMetadata,
 ) -> Result<Json<TotpSetupResponse>, ApiError> {
     let cmd = SetupTotpCommand {
@@ -143,7 +143,7 @@ pub async fn setup(
 )]
 pub async fn enable(
     State(state): State<AppState>,
-    auth_user: AuthUser,
+    auth_user: StepUpUser,
     metadata: ClientMetadata,
     Json(body): Json<EnableTotpRequest>,
 ) -> Result<Json<TotpEnabledResponse>, ApiError> {

@@ -81,6 +81,10 @@ pub enum EndpointLimit {
     ForgotPassword,
     /// MFA code verification (`rate_limit.mfa_max_requests`).
     MfaVerify,
+    /// Authenticated password change (`rate_limit.password_change_max_requests`).
+    PasswordChange,
+    /// Password reset token redemption (`rate_limit.password_reset_max_requests`).
+    PasswordReset,
 }
 
 impl EndpointLimit {
@@ -90,6 +94,8 @@ impl EndpointLimit {
             Self::Register => "register",
             Self::ForgotPassword => "forgot_password",
             Self::MfaVerify => "mfa_verify",
+            Self::PasswordChange => "password_change",
+            Self::PasswordReset => "password_reset",
         }
     }
 
@@ -99,6 +105,8 @@ impl EndpointLimit {
             Self::Register => settings.register_max_requests,
             Self::ForgotPassword => settings.forgot_password_max_requests,
             Self::MfaVerify => settings.mfa_max_requests,
+            Self::PasswordChange => settings.password_change_max_requests,
+            Self::PasswordReset => settings.password_reset_max_requests,
         }
     }
 }

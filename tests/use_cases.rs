@@ -4525,3 +4525,149 @@ async fn test_unban_never_bypasses_email_verification_and_requires_suspended() -
     assert!(matches!(res, Err(AppError::Conflict)));
     Ok(())
 }
+
+/// KRG-SEC-14: password-reset requests must do identical work (token generation,
+/// cache write, audit enqueue) whether or not the account exists, so response
+/// latency cannot enumerate accounts.
+#[tokio::test]
+async fn test_forgot_password_performs_identical_work_for_unknown_and_known_accounts() -> TestResult
+{
+    use korgan::application::dto::ForgotPasswordCommand;
+    use korgan::application::use_cases::password::ForgotPasswordUseCase;
+    use korgan::application::workers::AppEvent;
+
+    async fn run(
+        email: &str,
+        register: bool,
+    ) -> Result<(usize, usize, usize, usize), Box<dyn std::error::Error>> {
+        let user_repo = Arc::new(MockUserRepository::default());
+        let token_store = Arc::new(MockTokenStore::default());
+        let (event_bus, mut rx) = EventBus::new(16);
+
+        if register {
+            let mut user = User::new(EmailAddress::parse(email)?, None, None);
+            user.status = AccountStatus::Active;
+            user_repo.create(&user).await?;
+        }
+
+        let uc = ForgotPasswordUseCase::new(
+            user_repo,
+            token_store.clone(),
+            event_bus,
+            Duration::from_secs(3600),
+        );
+        uc.execute(ForgotPasswordCommand {
+            email: email.to_owned(),
+            ip_address: None,
+            user_agent: None,
+            request_id: RequestId::new(),
+        })
+        .await?;
+
+        let (mut mails, mut audits) = (0, 0);
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::SendPasswordResetEmail { .. } => mails += 1,
+                AppEvent::LogAudit(_) => audits += 1,
+                _ => {}
+            }
+        }
+        let tokens = token_store.tokens.lock().map_err(|e| e.to_string())?;
+        let real = tokens
+            .keys()
+            .filter(|k| k.starts_with("reset_password:"))
+            .count();
+        Ok((tokens.len(), real, mails, audits))
+    }
+
+    let (known_writes, known_real, known_mails, known_audits) =
+        run("known@example.com", true).await?;
+    let (unknown_writes, unknown_real, unknown_mails, unknown_audits) =
+        run("ghost@example.com", false).await?;
+
+    assert_eq!(known_writes, unknown_writes, "same number of cache writes");
+    assert_eq!(known_audits, unknown_audits, "same number of audit entries");
+    assert_eq!((known_real, known_mails), (1, 1));
+    assert_eq!(
+        (unknown_real, unknown_mails),
+        (0, 0),
+        "no resolvable reset key and no e-mail for a missing account"
+    );
+    Ok(())
+}
+
+/// KRG-SEC-15: an already MFA-protected account must not be able to replace its
+/// TOTP secret / backup codes via setup+enable (session-hijack MFA takeover);
+/// the factor must be disabled first (step-up + password).
+#[tokio::test]
+async fn test_totp_setup_and_enable_refuse_to_replace_existing_mfa() -> TestResult {
+    let user_repo = Arc::new(MockUserRepository::default());
+    let token_store = Arc::new(MockTokenStore::default());
+    let totp_service = Arc::new(MockTotpService);
+    let secret_cipher = Arc::new(MockSecretCipher);
+    let (event_bus, _rx) = EventBus::new(100);
+
+    let mut user = User::new(EmailAddress::parse("mfa.replace@example.com")?, None, None);
+    user.status = AccountStatus::Active;
+    user_repo.create(&user).await?;
+
+    let setup_uc = SetupTotpUseCase::new(
+        user_repo.clone(),
+        totp_service.clone(),
+        token_store.clone(),
+        "Korgan".to_owned(),
+        Duration::from_secs(900),
+    );
+    let enable_uc = EnableTotpUseCase::new(
+        user_repo.clone(),
+        totp_service.clone(),
+        secret_cipher.clone(),
+        token_store.clone(),
+        event_bus.clone(),
+    );
+
+    // First enrolment succeeds.
+    setup_uc
+        .execute(SetupTotpCommand {
+            user_id: user.id,
+            request_id: RequestId::new(),
+        })
+        .await?;
+    let enable_cmd = || EnableTotpCommand {
+        user_id: user.id,
+        code: "123456".to_owned(),
+        ip_address: None,
+        user_agent: None,
+        request_id: RequestId::new(),
+    };
+    enable_uc.execute(enable_cmd()).await?;
+    let original = user_repo.find_mfa(&user.id).await?.ok_or("mfa missing")?;
+
+    // A second setup is refused outright...
+    let res = setup_uc
+        .execute(SetupTotpCommand {
+            user_id: user.id,
+            request_id: RequestId::new(),
+        })
+        .await;
+    assert!(matches!(res, Err(AppError::Conflict)));
+
+    // ...and so is enabling with a (pre-planted) pending secret.
+    token_store
+        .set_token(
+            &format!("pending_totp:{}", user.id),
+            "JBSWY3DPEHPK3PXP",
+            Duration::from_secs(900),
+        )
+        .await?;
+    let res = enable_uc.execute(enable_cmd()).await;
+    assert!(matches!(res, Err(AppError::Conflict)));
+
+    let after = user_repo.find_mfa(&user.id).await?.ok_or("mfa missing")?;
+    assert_eq!(
+        after.totp_secret_ciphertext,
+        original.totp_secret_ciphertext
+    );
+    assert_eq!(after.backup_code_hashes, original.backup_code_hashes);
+    Ok(())
+}

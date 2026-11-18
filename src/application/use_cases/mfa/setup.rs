@@ -68,6 +68,12 @@ impl SetupTotpUseCase {
             .await?
             .ok_or(AppError::Unauthenticated)?;
 
+        // An enrolled factor can only be replaced after it has been disabled
+        // (step-up + password); otherwise a hijacked session could swap it out.
+        if user.mfa_enabled {
+            return Err(AppError::Conflict);
+        }
+
         let user_id = user.id;
         let email = user.email;
         let totp_service = self.totp_service.clone();

@@ -496,6 +496,10 @@ pub struct RateLimitSettings {
     pub forgot_password_max_requests: u32,
     /// MFA verification budget per window.
     pub mfa_max_requests: u32,
+    /// Password-change budget per window (credential-guessing guard for session holders).
+    pub password_change_max_requests: u32,
+    /// Password-reset (token redemption) budget per window.
+    pub password_reset_max_requests: u32,
     /// Trust `X-Forwarded-For` (only behind a trusted proxy).
     pub trust_proxy_headers: bool,
 }
@@ -881,6 +885,14 @@ impl Settings {
                     rl.forgot_password_max_requests,
                 ),
                 ("rate_limit.mfa_max_requests", rl.mfa_max_requests),
+                (
+                    "rate_limit.password_change_max_requests",
+                    rl.password_change_max_requests,
+                ),
+                (
+                    "rate_limit.password_reset_max_requests",
+                    rl.password_reset_max_requests,
+                ),
             ] {
                 if value == 0 {
                     problems.push(format!("{name} must be greater than zero"));
