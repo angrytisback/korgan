@@ -149,6 +149,7 @@ impl SessionRepository for PostgresSessionRepository {
         .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_by_id"))?;
+        drop(conn);
 
         row.map(Session::try_from).transpose()
     }
@@ -180,6 +181,7 @@ impl SessionRepository for PostgresSessionRepository {
         .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_by_token_hash"))?;
+        drop(conn);
 
         row.map(Session::try_from).transpose()
     }
@@ -224,6 +226,7 @@ impl SessionRepository for PostgresSessionRepository {
         .fetch_all(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "list_by_user_id"))?;
+        drop(conn);
 
         rows.into_iter().map(Session::try_from).collect()
     }

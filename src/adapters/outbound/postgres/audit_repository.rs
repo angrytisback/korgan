@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use ipnetwork::IpNetwork;
-use sqlx::PgPool;
+use sqlx::{PgPool, QueryBuilder};
 
 use crate::adapters::outbound::postgres::db::DbConn;
 use crate::adapters::outbound::postgres::models::AuditLogRow;
@@ -319,19 +319,17 @@ impl AuditLogRepository for PostgresAuditLogRepository {
 #[async_trait]
 impl AuditOutbox for PostgresAuditLogRepository {
     async fn enqueue(&self, entry: &AuditLog) -> Result<(), PortError> {
-        let payload = serde_json::to_value(entry)
-            .map_err(|e| PortError::database(format!("serialize audit entry failed: {e}")))?;
-
         // Joins the ambient unit-of-work transaction when there is one, so the
         // entry commits atomically with the state change it describes.
         let mut conn = DbConn::acquire(&self.pool)
             .await
             .map_err(|e| Self::map_sqlx_error(e, "acquire connection"))?;
         sqlx::query("INSERT INTO audit_outbox (payload) VALUES ($1)")
-            .bind(payload)
+            .bind(sqlx::types::Json(entry))
             .execute(&mut *conn)
             .await
             .map_err(|e| Self::map_sqlx_error(e, "enqueue audit entry"))?;
+        drop(conn);
 
         Ok(())
     }
@@ -389,6 +387,7 @@ impl AuditOutbox for PostgresAuditLogRepository {
 
         let mut done: Vec<i64> = Vec::with_capacity(queued.len());
         let mut poisoned: Vec<i64> = Vec::new();
+        let mut chained_entries: Vec<AuditLog> = Vec::with_capacity(queued.len());
 
         for (seq, payload) in queued {
             let mut entry: AuditLog = match serde_json::from_value(payload) {
@@ -408,32 +407,35 @@ impl AuditOutbox for PostgresAuditLogRepository {
             };
             entry.chain_with_timestamp(prev_hash.as_deref(), created_at);
 
-            sqlx::query(
-                r#"
-                INSERT INTO audit_logs (
-                    id, user_id, actor_ip, user_agent, request_id, event_type,
-                    event_status, metadata, prev_hash, entry_hash, created_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                "#,
-            )
-            .bind(entry.id.to_uuid())
-            .bind(entry.user_id.as_ref().map(|u| u.to_uuid()))
-            .bind(entry.actor_ip.map(IpNetwork::from))
-            .bind(entry.user_agent.as_deref())
-            .bind(entry.request_id.to_uuid())
-            .bind(&entry.event_type)
-            .bind(entry.event_status.as_str())
-            .bind(&entry.metadata)
-            .bind(entry.prev_hash.as_deref())
-            .bind(entry.entry_hash.as_deref())
-            .bind(entry.created_at)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Self::map_sqlx_error(e, "chain audit entry"))?;
-
             prev_created_at = Some(entry.created_at);
             prev_hash = entry.entry_hash.clone();
             done.push(seq);
+            chained_entries.push(entry);
+        }
+
+        if !chained_entries.is_empty() {
+            let mut query_builder: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+                "INSERT INTO audit_logs (id, user_id, actor_ip, user_agent, request_id, event_type, event_status, metadata, prev_hash, entry_hash, created_at) ",
+            );
+            query_builder.push_values(chained_entries, |mut b, entry| {
+                b.push_bind(entry.id.to_uuid())
+                    .push_bind(entry.user_id.as_ref().map(|u| u.to_uuid()))
+                    .push_bind(entry.actor_ip.map(IpNetwork::from))
+                    .push_bind(entry.user_agent)
+                    .push_bind(entry.request_id.to_uuid())
+                    .push_bind(entry.event_type)
+                    .push_bind(entry.event_status.as_str())
+                    .push_bind(entry.metadata)
+                    .push_bind(entry.prev_hash)
+                    .push_bind(entry.entry_hash)
+                    .push_bind(entry.created_at);
+            });
+
+            let query = query_builder.build();
+            query
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Self::map_sqlx_error(e, "batch chain audit entries"))?;
         }
 
         if !done.is_empty() {

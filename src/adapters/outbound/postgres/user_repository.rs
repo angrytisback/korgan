@@ -77,6 +77,7 @@ impl UserRepository for PostgresUserRepository {
         .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_by_id"))?;
+        drop(conn);
 
         row.map(User::try_from).transpose()
     }
@@ -110,6 +111,7 @@ impl UserRepository for PostgresUserRepository {
         .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_by_email"))?;
+        drop(conn);
 
         row.map(User::try_from).transpose()
     }
@@ -143,6 +145,7 @@ impl UserRepository for PostgresUserRepository {
         .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_by_username"))?;
+        drop(conn);
 
         row.map(User::try_from).transpose()
     }
@@ -375,6 +378,7 @@ impl UserRepository for PostgresUserRepository {
         .fetch_all(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "get password history"))?;
+        drop(conn);
 
         let mut hashes = Vec::with_capacity(rows.len());
         for row in rows {
@@ -408,6 +412,7 @@ impl UserRepository for PostgresUserRepository {
         .fetch_optional(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "find_mfa"))?;
+        drop(conn);
 
         row.map(UserMfa::try_from).transpose()
     }
@@ -441,7 +446,7 @@ impl UserRepository for PostgresUserRepository {
         .bind(user_uuid)
         .bind(&mfa.key_id)
         .bind(&mfa.totp_secret_ciphertext)
-        .bind(&mfa.totp_secret_nonce)
+        .bind(mfa.totp_secret_nonce)
         .bind(&mfa.backup_code_hashes)
         .bind(mfa.verified_at)
         .bind(mfa.updated_at)
@@ -486,7 +491,7 @@ impl UserRepository for PostgresUserRepository {
         .bind(user_uuid)
         .bind(&mfa.key_id)
         .bind(&mfa.totp_secret_ciphertext)
-        .bind(&mfa.totp_secret_nonce)
+        .bind(mfa.totp_secret_nonce)
         .bind(&mfa.backup_code_hashes)
         .bind(mfa.verified_at)
         .bind(mfa.updated_at)
@@ -692,6 +697,7 @@ impl UserRepository for PostgresUserRepository {
         .fetch_all(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "list_paginated"))?;
+        drop(conn);
 
         rows.into_iter().map(User::try_from).collect()
     }
@@ -706,6 +712,7 @@ impl UserRepository for PostgresUserRepository {
         .fetch_one(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "count_all"))?;
+        drop(conn);
 
         Ok(u64::try_from(row.count).unwrap_or(0))
     }
@@ -737,6 +744,7 @@ impl UserRepository for PostgresUserRepository {
         .fetch_one(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "purge_expired_unverified"))?;
+        drop(conn);
 
         let count_u64 = u64::try_from(row.0).unwrap_or(0);
         Ok(count_u64)
@@ -754,6 +762,7 @@ impl UserRepository for PostgresUserRepository {
         .fetch_one(&mut *conn)
         .await
         .map_err(|e| Self::map_sqlx_error(e, "has_admin_user"))?;
+        drop(conn);
 
         Ok(exists)
     }

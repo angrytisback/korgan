@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use deadpool_redis::Pool;
-use deadpool_redis::redis::{AsyncCommands, cmd, pipe};
+use deadpool_redis::redis::{AsyncCommands, Script, cmd, pipe};
 
 use crate::ports::cache::{TokenStore, WsTicketPayload};
 use crate::ports::errors::PortError;
@@ -24,33 +24,12 @@ else
 end
 "#;
 
-/// Atomic GETDEL Lua script:
-/// Retrieves the current value of the key and deletes it atomically in a single step.
-const GET_AND_DELETE_LUA: &str = r#"
-local current = redis.call('GET', KEYS[1])
-if current then
-    redis.call('DEL', KEYS[1])
-end
-return current
-"#;
-
-/// Atomic SET NX EX Lua script:
-/// Sets the key with expiration only if it does not already exist.
-/// Returns 1 if set, 0 if already existed.
-const SET_IF_NOT_EXISTS_LUA: &str = r#"
-local res = redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2], 'NX')
-if res then
-    return 1
-else
-    return 0
-end
-"#;
-
 /// Redis-backed implementation of [`TokenStore`].
 #[derive(Clone)]
 pub struct RedisTokenStore {
     pool: Pool,
     prefix: String,
+    consume_script: Script,
 }
 
 impl std::fmt::Debug for RedisTokenStore {
@@ -68,6 +47,7 @@ impl RedisTokenStore {
         Self {
             pool,
             prefix: prefix.into(),
+            consume_script: Script::new(CONSUME_TOKEN_LUA),
         }
     }
 
@@ -129,17 +109,14 @@ impl TokenStore for RedisTokenStore {
         let mut conn = self.get_conn().await?;
         let namespaced = self.namespaced_key(key);
 
-        let result: Option<String> = cmd("EVAL")
-            .arg(GET_AND_DELETE_LUA)
-            .arg(1)
+        let result: Option<String> = cmd("GETDEL")
             .arg(namespaced)
             .query_async(&mut conn)
             .await
             .map_err(|e| {
-                PortError::cache(format!(
-                    "failed to execute atomic get-and-delete script: {e}"
-                ))
+                PortError::cache(format!("failed to execute native GETDEL command: {e}"))
             })?;
+        drop(conn);
 
         Ok(result)
     }
@@ -148,18 +125,18 @@ impl TokenStore for RedisTokenStore {
         let mut conn = self.get_conn().await?;
         let namespaced = self.namespaced_key(key);
 
-        let result: i32 = cmd("EVAL")
-            .arg(CONSUME_TOKEN_LUA)
-            .arg(1)
-            .arg(namespaced)
+        let result: i32 = self
+            .consume_script
+            .key(namespaced)
             .arg(expected_token_hash)
-            .query_async(&mut conn)
+            .invoke_async(&mut conn)
             .await
             .map_err(|e| {
                 PortError::cache(format!(
                     "failed to execute atomic token consumption script: {e}"
                 ))
             })?;
+        drop(conn);
 
         Ok(result == 1)
     }
@@ -174,21 +151,20 @@ impl TokenStore for RedisTokenStore {
         let namespaced = self.namespaced_key(key);
         let ttl_secs = ttl.as_secs().max(1);
 
-        let result: i32 = cmd("EVAL")
-            .arg(SET_IF_NOT_EXISTS_LUA)
-            .arg(1)
+        let result: Option<String> = cmd("SET")
             .arg(namespaced)
             .arg(value)
+            .arg("EX")
             .arg(ttl_secs)
+            .arg("NX")
             .query_async(&mut conn)
             .await
             .map_err(|e| {
-                PortError::cache(format!(
-                    "failed to execute atomic set-if-not-exists script: {e}"
-                ))
+                PortError::cache(format!("failed to execute native SET NX EX command: {e}"))
             })?;
+        drop(conn);
 
-        Ok(result == 1)
+        Ok(result.as_deref() == Some("OK"))
     }
 
     async fn set_tokens_batch(&self, items: &[(&str, &str, Duration)]) -> Result<(), PortError> {

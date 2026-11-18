@@ -195,7 +195,7 @@ impl TryFrom<SessionRow> for Session {
             revoked_at: row.revoked_at,
             revoke_reason: row.revoke_reason,
             created_at: row.created_at,
-            amr: Vec::new(),
+            amr: Default::default(),
         })
     }
 }
@@ -219,11 +219,15 @@ impl TryFrom<UserMfaRow> for UserMfa {
         let user_id = UserId::from_uuid(row.user_id)
             .map_err(|e| PortError::database(format!("invalid user ID in MFA: {e}")))?;
 
+        let totp_secret_nonce: [u8; 12] = row.totp_secret_nonce.try_into().map_err(|_| {
+            PortError::database("invalid totp_secret_nonce length: expected 12 bytes")
+        })?;
+
         Ok(UserMfa {
             user_id,
             key_id: row.key_id,
             totp_secret_ciphertext: row.totp_secret_ciphertext,
-            totp_secret_nonce: row.totp_secret_nonce,
+            totp_secret_nonce,
             backup_code_hashes: row.backup_code_hashes,
             verified_at: row.verified_at,
             updated_at: row.updated_at,

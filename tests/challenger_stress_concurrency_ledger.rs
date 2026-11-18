@@ -424,13 +424,13 @@ impl TokenSigner for StressTokenSigner {
         Ok(AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "http://localhost:8080".to_owned(),
-            aud: "korgan_api".to_owned(),
+            iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+            aud: std::borrow::Cow::Borrowed("korgan_api"),
             exp: Utc::now().timestamp() + 900,
             iat: Utc::now().timestamp(),
             jti: "stress-jti".to_owned(),
             auth_time: Utc::now().timestamp(),
-            amr: vec!["pwd".to_string()],
+            amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
         })
     }
 

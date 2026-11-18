@@ -29,6 +29,8 @@ pub struct Ed25519JwtService {
     verifying_key: VerifyingKey,
     verifying_keys: HashMap<String, VerifyingKey>,
     kid: String,
+    cached_header_b64: String,
+    cached_jwks: serde_json::Value,
 }
 
 impl std::fmt::Debug for Ed25519JwtService {
@@ -42,6 +44,49 @@ impl std::fmt::Debug for Ed25519JwtService {
 }
 
 impl Ed25519JwtService {
+    fn compute_header_b64(kid: &str) -> String {
+        let header = JwtHeader {
+            alg: "EdDSA".to_string(),
+            typ: Some("at+jwt".to_string()),
+            kid: Some(kid.to_string()),
+        };
+        match serde_json::to_vec(&header) {
+            Ok(json) => BASE64_URL_SAFE_NO_PAD.encode(&json),
+            Err(_) => String::new(),
+        }
+    }
+
+    fn compute_jwks(
+        kid: &str,
+        verifying_keys: &HashMap<String, VerifyingKey>,
+    ) -> serde_json::Value {
+        let mut sorted_keys: Vec<(&String, &VerifyingKey)> = verifying_keys.iter().collect();
+        sorted_keys.sort_by(|(k1, _), (k2, _)| {
+            if *k1 == kid {
+                std::cmp::Ordering::Less
+            } else if *k2 == kid {
+                std::cmp::Ordering::Greater
+            } else {
+                k1.cmp(k2)
+            }
+        });
+
+        let mut keys = Vec::with_capacity(sorted_keys.len());
+        for (k, key) in sorted_keys {
+            let x = BASE64_URL_SAFE_NO_PAD.encode(key.to_bytes());
+            keys.push(serde_json::json!({
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "use": "sig",
+                "alg": "EdDSA",
+                "kid": k,
+                "x": x
+            }));
+        }
+
+        serde_json::json!({ "keys": keys })
+    }
+
     /// Creates an [`Ed25519JwtService`] with an active signing key and optional additional verifying keys.
     #[must_use]
     pub fn new(
@@ -54,11 +99,16 @@ impl Ed25519JwtService {
         let mut verifying_keys = additional_keys;
         verifying_keys.insert(kid.clone(), verifying_key);
 
+        let cached_header_b64 = Self::compute_header_b64(&kid);
+        let cached_jwks = Self::compute_jwks(&kid, &verifying_keys);
+
         Self {
             signing_key,
             verifying_key,
             verifying_keys,
             kid,
+            cached_header_b64,
+            cached_jwks,
         }
     }
 
@@ -75,11 +125,16 @@ impl Ed25519JwtService {
         let mut verifying_keys = HashMap::new();
         verifying_keys.insert(kid.clone(), verifying_key);
 
+        let cached_header_b64 = Self::compute_header_b64(&kid);
+        let cached_jwks = Self::compute_jwks(&kid, &verifying_keys);
+
         Ok(Self {
             signing_key,
             verifying_key,
             verifying_keys,
             kid,
+            cached_header_b64,
+            cached_jwks,
         })
     }
 
@@ -96,17 +151,23 @@ impl Ed25519JwtService {
         let mut verifying_keys = HashMap::new();
         verifying_keys.insert(kid.clone(), verifying_key);
 
+        let cached_header_b64 = Self::compute_header_b64(&kid);
+        let cached_jwks = Self::compute_jwks(&kid, &verifying_keys);
+
         Ok(Self {
             signing_key,
             verifying_key,
             verifying_keys,
             kid,
+            cached_header_b64,
+            cached_jwks,
         })
     }
 
     /// Registers an additional verifying public key for key rotation verification.
     pub fn add_verifying_key(&mut self, kid: impl Into<String>, key: VerifyingKey) {
         self.verifying_keys.insert(kid.into(), key);
+        self.cached_jwks = Self::compute_jwks(&self.kid, &self.verifying_keys);
     }
 
     /// Builder method to register an additional verifying public key.
@@ -145,20 +206,11 @@ impl Ed25519JwtService {
 
 impl TokenSigner for Ed25519JwtService {
     fn sign_access_token(&self, claims: &AccessTokenClaims) -> Result<String, PortError> {
-        let header = JwtHeader {
-            alg: "EdDSA".to_string(),
-            typ: Some("at+jwt".to_string()),
-            kid: Some(self.kid.clone()),
-        };
-
-        let header_json = serde_json::to_vec(&header)
-            .map_err(|e| PortError::crypto(format!("failed to serialize JWT header: {e}")))?;
         let payload_json = serde_json::to_vec(claims)
             .map_err(|e| PortError::crypto(format!("failed to serialize JWT claims: {e}")))?;
 
-        let header_b64 = BASE64_URL_SAFE_NO_PAD.encode(&header_json);
         let payload_b64 = BASE64_URL_SAFE_NO_PAD.encode(&payload_json);
-        let signing_input = format!("{header_b64}.{payload_b64}");
+        let signing_input = format!("{}.{payload_b64}", self.cached_header_b64);
 
         let signature = self.signing_key.sign(signing_input.as_bytes());
         let sig_b64 = BASE64_URL_SAFE_NO_PAD.encode(signature.to_bytes());
@@ -290,36 +342,16 @@ impl TokenSigner for Ed25519JwtService {
     }
 
     fn public_key_jwks(&self) -> Result<serde_json::Value, PortError> {
-        let mut sorted_keys: Vec<(&String, &VerifyingKey)> = self.verifying_keys.iter().collect();
-        sorted_keys.sort_by(|(k1, _), (k2, _)| {
-            if *k1 == &self.kid {
-                std::cmp::Ordering::Less
-            } else if *k2 == &self.kid {
-                std::cmp::Ordering::Greater
-            } else {
-                k1.cmp(k2)
-            }
-        });
-
-        let mut keys = Vec::with_capacity(sorted_keys.len());
-        for (kid, key) in sorted_keys {
-            let x = BASE64_URL_SAFE_NO_PAD.encode(key.to_bytes());
-            keys.push(serde_json::json!({
-                "kty": "OKP",
-                "crv": "Ed25519",
-                "use": "sig",
-                "alg": "EdDSA",
-                "kid": kid,
-                "x": x
-            }));
-        }
-
-        Ok(serde_json::json!({ "keys": keys }))
+        Ok(self.cached_jwks.clone())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
+    use smallvec::smallvec;
+
     use super::*;
     use crate::domain::value_objects::{SessionId, UserId};
 
@@ -332,13 +364,13 @@ mod tests {
         let claims = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "https://auth.korgan.local".to_string(),
-            aud: "korgan".to_string(),
+            iss: Cow::Borrowed("https://auth.korgan.local"),
+            aud: Cow::Borrowed("korgan"),
             exp: now.timestamp() + 3600,
             iat: now.timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp() - 10,
-            amr: vec!["pwd".to_string(), "mfa".to_string()],
+            amr: smallvec![Cow::Borrowed("pwd"), Cow::Borrowed("mfa")],
         };
 
         let token = service.sign_access_token(&claims)?;
@@ -351,7 +383,10 @@ mod tests {
         assert_eq!(verified.aud, claims.aud);
         assert_eq!(verified.exp, claims.exp);
         assert_eq!(verified.auth_time, claims.auth_time);
-        assert_eq!(verified.amr, vec!["pwd", "mfa"]);
+        assert_eq!(
+            verified.amr.as_slice(),
+            &[Cow::Borrowed("pwd"), Cow::Borrowed("mfa")]
+        );
         Ok(())
     }
 
@@ -362,13 +397,13 @@ mod tests {
         let claims = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "https://auth.korgan.local".to_string(),
-            aud: "korgan".to_string(),
+            iss: Cow::Borrowed("https://auth.korgan.local"),
+            aud: Cow::Borrowed("korgan"),
             exp: now.timestamp() - 60, // already expired
             iat: now.timestamp() - 120,
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp() - 200,
-            amr: vec!["pwd".to_string()],
+            amr: smallvec![Cow::Borrowed("pwd")],
         };
 
         let token = service.sign_access_token(&claims)?;
@@ -384,13 +419,13 @@ mod tests {
         let claims = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "https://auth.korgan.local".to_string(),
-            aud: "korgan".to_string(),
+            iss: Cow::Borrowed("https://auth.korgan.local"),
+            aud: Cow::Borrowed("korgan"),
             exp: now.timestamp() + 3600,
             iat: now.timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp(),
-            amr: vec!["passkey".to_string()],
+            amr: smallvec![Cow::Borrowed("passkey")],
         };
 
         let token = service.sign_access_token(&claims)?;
@@ -409,13 +444,13 @@ mod tests {
         let claims_zero = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "https://auth.korgan.local".to_string(),
-            aud: "korgan".to_string(),
+            iss: Cow::Borrowed("https://auth.korgan.local"),
+            aud: Cow::Borrowed("korgan"),
             exp: now.timestamp() + 3600,
             iat: now.timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: 0,
-            amr: vec!["pwd".to_string()],
+            amr: smallvec![Cow::Borrowed("pwd")],
         };
         let token_zero = service.sign_access_token(&claims_zero)?;
         assert!(service.verify_access_token(&token_zero).is_err());
@@ -424,13 +459,13 @@ mod tests {
         let claims_future = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "https://auth.korgan.local".to_string(),
-            aud: "korgan".to_string(),
+            iss: Cow::Borrowed("https://auth.korgan.local"),
+            aud: Cow::Borrowed("korgan"),
             exp: now.timestamp() + 3600,
             iat: now.timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp() + 300,
-            amr: vec!["pwd".to_string()],
+            amr: smallvec![Cow::Borrowed("pwd")],
         };
         let token_future = service.sign_access_token(&claims_future)?;
         assert!(service.verify_access_token(&token_future).is_err());
@@ -439,13 +474,13 @@ mod tests {
         let claims_after_iat = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "https://auth.korgan.local".to_string(),
-            aud: "korgan".to_string(),
+            iss: Cow::Borrowed("https://auth.korgan.local"),
+            aud: Cow::Borrowed("korgan"),
             exp: now.timestamp() + 3600,
             iat: now.timestamp() - 100,
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp(),
-            amr: vec!["pwd".to_string()],
+            amr: smallvec![Cow::Borrowed("pwd")],
         };
         let token_after_iat = service.sign_access_token(&claims_after_iat)?;
         assert!(service.verify_access_token(&token_after_iat).is_err());
@@ -460,13 +495,13 @@ mod tests {
         let claims = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "https://auth.korgan.local".to_string(),
-            aud: "korgan".to_string(),
+            iss: Cow::Borrowed("https://auth.korgan.local"),
+            aud: Cow::Borrowed("korgan"),
             exp: now.timestamp() + 3600,
             iat: now.timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp(),
-            amr: vec!["".to_string()],
+            amr: smallvec![Cow::Borrowed("")],
         };
         let token = service.sign_access_token(&claims)?;
         assert!(service.verify_access_token(&token).is_err());
@@ -498,13 +533,13 @@ mod tests {
         let claims = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "https://auth.korgan.local".to_string(),
-            aud: "korgan".to_string(),
+            iss: Cow::Borrowed("https://auth.korgan.local"),
+            aud: Cow::Borrowed("korgan"),
             exp: now.timestamp() + 3600,
             iat: now.timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp() - 10,
-            amr: vec!["pwd".to_string(), "mfa".to_string()],
+            amr: smallvec![Cow::Borrowed("pwd"), Cow::Borrowed("mfa")],
         };
 
         // Token signed with older key
@@ -573,13 +608,13 @@ mod tests {
         let claims = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "https://auth.korgan.local".to_string(),
-            aud: "korgan".to_string(),
+            iss: Cow::Borrowed("https://auth.korgan.local"),
+            aud: Cow::Borrowed("korgan"),
             exp: now.timestamp() + 3600,
             iat: now.timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp(),
-            amr: vec!["pwd".to_string()],
+            amr: smallvec![Cow::Borrowed("pwd")],
         };
 
         // Header without 'kid'
@@ -632,13 +667,13 @@ mod tests {
         let claims = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "https://auth.korgan.local".to_string(),
-            aud: "korgan".to_string(),
+            iss: Cow::Borrowed("https://auth.korgan.local"),
+            aud: Cow::Borrowed("korgan"),
             exp: now.timestamp() + 3600,
             iat: now.timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp(),
-            amr: vec!["pwd".to_string()],
+            amr: smallvec![Cow::Borrowed("pwd")],
         };
 
         // Header claims kid is "key-a", but signature is created using service_b's private key
@@ -672,13 +707,13 @@ mod tests {
         let claims = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "https://auth.korgan.local".to_string(),
-            aud: "korgan".to_string(),
+            iss: Cow::Borrowed("https://auth.korgan.local"),
+            aud: Cow::Borrowed("korgan"),
             exp: now.timestamp() + 3600,
             iat: now.timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp(),
-            amr: vec!["pwd".to_string()],
+            amr: smallvec![Cow::Borrowed("pwd")],
         };
 
         let header = serde_json::json!({
@@ -708,13 +743,13 @@ mod tests {
         let claims = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "https://auth.korgan.local".to_string(),
-            aud: "korgan".to_string(),
+            iss: Cow::Borrowed("https://auth.korgan.local"),
+            aud: Cow::Borrowed("korgan"),
             exp: now.timestamp() + 3600,
             iat: now.timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp(),
-            amr: vec!["pwd".to_string()],
+            amr: smallvec![Cow::Borrowed("pwd")],
         };
 
         for invalid_typ in &["JWT", "refresh+jwt", "id+jwt", ""] {
@@ -751,13 +786,13 @@ mod tests {
         let claims = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "https://auth.korgan.local".to_string(),
-            aud: "korgan".to_string(),
+            iss: Cow::Borrowed("https://auth.korgan.local"),
+            aud: Cow::Borrowed("korgan"),
             exp: now.timestamp() + 3600,
             iat: now.timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp(),
-            amr: vec!["pwd".to_string()],
+            amr: smallvec![Cow::Borrowed("pwd")],
         };
 
         let header = serde_json::json!({
