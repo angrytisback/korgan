@@ -283,6 +283,16 @@ pub trait SecretCipher: Send + Sync + 'static {
         nonce: &[u8],
         aad: &[u8],
     ) -> Result<DecryptedSecret, PortError>;
+
+    /// Computes the keyed, deterministic digest under which an MFA backup code
+    /// is stored and looked up (hex-encoded HMAC-SHA256 with a key derived from
+    /// the vault master key). A leaked database alone therefore cannot be used
+    /// to brute-force the low-entropy backup codes offline (KRG-SEC-06).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PortError`] if the keyed digest cannot be computed.
+    fn backup_code_hash(&self, code: &str) -> Result<String, PortError>;
 }
 
 /// External user profile fetched from an `OAuth2` / OIDC provider.

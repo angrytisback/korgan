@@ -3,8 +3,10 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
+use hmac::{Hmac, Mac};
 use rand::Rng;
-use zeroize::Zeroize;
+use sha2::Sha256;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::ports::errors::PortError;
 use crate::ports::services::DecryptedSecret;
@@ -19,6 +21,21 @@ pub const AES_256_KEY_LEN: usize = 32;
 #[derive(Clone)]
 pub struct Aes256GcmCipher {
     cipher: Aes256Gcm,
+    /// HMAC key for backup-code digests, derived from the master key under a
+    /// dedicated domain-separation label (never the AES key itself).
+    backup_code_key: Zeroizing<[u8; 32]>,
+}
+
+/// Domain-separation label for deriving the backup-code HMAC key.
+const BACKUP_CODE_KEY_LABEL: &[u8] = b"KORGAN_BACKUP_CODE_KEY_V1\0";
+
+type HmacSha256 = Hmac<Sha256>;
+
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<[u8; 32], PortError> {
+    let mut mac = <HmacSha256 as KeyInit>::new_from_slice(key)
+        .map_err(|e| PortError::crypto(format!("invalid HMAC key: {e}")))?;
+    mac.update(data);
+    Ok(mac.finalize().into_bytes().into())
 }
 
 impl std::fmt::Debug for Aes256GcmCipher {
@@ -47,7 +64,12 @@ impl Aes256GcmCipher {
             PortError::crypto(format!("failed to initialize AES-256-GCM cipher: {e}"))
         })?;
 
-        Ok(Self { cipher })
+        let backup_code_key = Zeroizing::new(hmac_sha256(key, BACKUP_CODE_KEY_LABEL)?);
+
+        Ok(Self {
+            cipher,
+            backup_code_key,
+        })
     }
 
     /// Creates an [`Aes256GcmCipher`] by decoding a Base64-encoded 32-byte key string.
@@ -146,6 +168,17 @@ impl Aes256GcmCipher {
 }
 
 impl crate::ports::services::SecretCipher for Aes256GcmCipher {
+    fn backup_code_hash(&self, code: &str) -> Result<String, PortError> {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let digest = hmac_sha256(self.backup_code_key.as_slice(), code.as_bytes())?;
+        let mut out = String::with_capacity(64);
+        for b in digest {
+            out.push(char::from(HEX[usize::from(b >> 4)]));
+            out.push(char::from(HEX[usize::from(b & 0x0F)]));
+        }
+        Ok(out)
+    }
+
     fn encrypt(&self, plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>), PortError> {
         let (ct, nonce) = self.encrypt(plaintext)?;
         Ok((ct, nonce.to_vec()))
@@ -191,6 +224,29 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn backup_code_hash_is_keyed_deterministic_and_not_plain_sha256() -> TestResult {
+        use crate::ports::services::SecretCipher as _;
+        let a = Aes256GcmCipher::new(&[1u8; 32])?;
+        let b = Aes256GcmCipher::new(&[2u8; 32])?;
+
+        let h1 = a.backup_code_hash("ABCD2345")?;
+        assert_eq!(h1.len(), 64);
+        assert_eq!(h1, a.backup_code_hash("ABCD2345")?, "must be deterministic");
+        assert_ne!(h1, a.backup_code_hash("ABCD2346")?);
+        assert_ne!(
+            h1,
+            b.backup_code_hash("ABCD2345")?,
+            "must depend on the key"
+        );
+        // Plain SHA-256("ABCD2345") — the pre-fix, offline-bruteforceable digest.
+        assert_ne!(
+            h1,
+            crate::application::use_cases::token_utils::hash_token("ABCD2345")
+        );
+        Ok(())
+    }
 
     #[test]
     fn encrypts_and_decrypts_successfully() -> TestResult {

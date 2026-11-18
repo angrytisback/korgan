@@ -879,7 +879,7 @@ async fn adversarial_auth_user_strict_iss_matching() -> TestResult {
         let req_cookie = Request::builder()
             .method(Method::GET)
             .uri("/api/v1/users/me")
-            .header(COOKIE, format!("access_token={token}"))
+            .header(COOKIE, format!("__Host-access_token={token}"))
             .body(Body::empty())?;
 
         let res_cookie = send_request(&ctx.app, req_cookie).await?;
@@ -968,7 +968,7 @@ async fn adversarial_auth_user_strict_aud_matching() -> TestResult {
         let req_cookie = Request::builder()
             .method(Method::GET)
             .uri("/api/v1/users/me")
-            .header(COOKIE, format!("access_token={token}"))
+            .header(COOKIE, format!("__Host-access_token={token}"))
             .body(Body::empty())?;
 
         let res_cookie = send_request(&ctx.app, req_cookie).await?;
@@ -1060,7 +1060,7 @@ async fn adversarial_auth_user_exact_valid_tokens_succeed() -> TestResult {
     let req3 = Request::builder()
         .method(Method::GET)
         .uri("/api/v1/users/me")
-        .header(COOKIE, format!("access_token={app_at_jwt_token}"))
+        .header(COOKIE, format!("__Host-access_token={app_at_jwt_token}"))
         .body(Body::empty())?;
     let res3 = send_request(&ctx.app, req3).await?;
     assert_eq!(res3.status(), StatusCode::OK);

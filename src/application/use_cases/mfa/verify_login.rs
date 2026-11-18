@@ -177,7 +177,7 @@ impl VerifyMfaLoginUseCase {
                 Ok(false)
             }
         } else if code.len() == 8 {
-            let code_hash = hash_token(code);
+            let code_hash = self.secret_cipher.backup_code_hash(code)?;
             // Constant-time traversal across all 10 indices
             let in_memory_valid = mfa.consume_backup_code(&code_hash);
             if in_memory_valid {

@@ -406,7 +406,6 @@ pub async fn refresh(
         .filter(|t| !t.trim().is_empty());
     let token_from_cookie = jar
         .get("__Host-refresh_token")
-        .or_else(|| jar.get("refresh_token"))
         .map(|c| c.value().to_owned())
         .filter(|t| !t.trim().is_empty());
 
@@ -540,8 +539,7 @@ pub async fn logout(
         .is_some_and(|t| !t.trim().is_empty());
     let has_cookie_token = jar
         .get("__Host-refresh_token")
-        .or_else(|| jar.get("refresh_token"))
-        .or_else(|| jar.get("access_token"))
+        .or_else(|| jar.get("__Host-access_token"))
         .is_some_and(|c| !c.value().trim().is_empty());
 
     // 1. Ambiguous token injection: reject if token supplied in both cookie and JSON body
@@ -580,7 +578,7 @@ pub async fn logout(
     state.revoke_session_use_case.execute(cmd).await?;
 
     let updated_jar = if metadata.client_type.is_web() {
-        clear_auth_cookies(jar, &state)
+        clear_auth_cookies(jar)
     } else {
         jar
     };
@@ -594,86 +592,38 @@ pub(crate) fn attach_auth_cookies(
     tokens: &AuthTokensResult,
     state: &AppState,
 ) -> CookieJar {
-    let domain = state.settings.auth.cookie_domain.as_deref();
-
-    // Access token cookie
-    let access_cookie = build_cookie(
-        "access_token",
+    jar = jar.add(build_host_cookie(
+        "__Host-access_token",
         tokens.access_token.clone(),
         state.settings.auth.access_token_ttl_secs,
-        domain,
-    );
-    jar = jar.add(access_cookie);
-
-    // RFC 6265bis __Host- cookie prefix: MUST be Secure, Path=/, and MUST NOT include Domain attribute
-    let host_refresh_cookie = Cookie::build(("__Host-refresh_token", tokens.refresh_token.clone()))
-        .path("/")
-        .http_only(true)
-        .secure(true)
-        .same_site(SameSite::Strict)
-        .max_age(CookieDuration::seconds(
-            i64::try_from(state.settings.auth.refresh_token_ttl_secs).unwrap_or(i64::MAX),
-        ))
-        .build();
-    jar = jar.add(host_refresh_cookie);
-
+    ));
+    jar = jar.add(build_host_cookie(
+        "__Host-refresh_token",
+        tokens.refresh_token.clone(),
+        state.settings.auth.refresh_token_ttl_secs,
+    ));
     jar
 }
 
 /// Helper to clear auth cookies upon logout.
-fn clear_auth_cookies(mut jar: CookieJar, state: &AppState) -> CookieJar {
-    let domain = state.settings.auth.cookie_domain.as_deref();
-
-    jar = jar.add(removal_cookie("access_token", domain));
-    jar = jar.add(
-        Cookie::build(("__Host-refresh_token", ""))
-            .path("/")
-            .http_only(true)
-            .secure(true)
-            .same_site(SameSite::Strict)
-            .max_age(CookieDuration::ZERO)
-            .build(),
-    );
-    jar = jar.add(removal_cookie("refresh_token", domain));
-
+fn clear_auth_cookies(mut jar: CookieJar) -> CookieJar {
+    jar = jar.add(build_host_cookie("__Host-access_token", String::new(), 0));
+    jar = jar.add(build_host_cookie("__Host-refresh_token", String::new(), 0));
     jar
 }
 
-fn build_cookie<'a>(
-    name: &'static str,
-    value: String,
-    max_age_secs: u64,
-    domain: Option<&str>,
-) -> Cookie<'a> {
-    let mut builder = Cookie::build((name, value))
+/// Builds an RFC 6265bis `__Host-` cookie: `Secure`, `Path=/`, **no** `Domain`
+/// attribute, `HttpOnly`, `SameSite=Strict`.
+fn build_host_cookie<'a>(name: &'static str, value: String, max_age_secs: u64) -> Cookie<'a> {
+    Cookie::build((name, value))
         .path("/")
         .http_only(true)
         .secure(true)
         .same_site(SameSite::Strict)
         .max_age(CookieDuration::seconds(
             i64::try_from(max_age_secs).unwrap_or(i64::MAX),
-        ));
-
-    if let Some(dom) = domain {
-        builder = builder.domain(dom.to_owned());
-    }
-
-    builder.build()
-}
-
-fn removal_cookie<'a>(name: &'static str, domain: Option<&str>) -> Cookie<'a> {
-    let mut builder = Cookie::build((name, ""))
-        .path("/")
-        .http_only(true)
-        .secure(true)
-        .same_site(SameSite::Strict)
-        .max_age(CookieDuration::ZERO);
-
-    if let Some(dom) = domain {
-        builder = builder.domain(dom.to_owned());
-    }
-
-    builder.build()
+        ))
+        .build()
 }
 
 /// WebSocket ticket issuance response.

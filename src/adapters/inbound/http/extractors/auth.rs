@@ -259,7 +259,7 @@ impl FromRequestParts<AppState> for StepUpUser {
     }
 }
 
-/// Extracts access token from Authorization header (`Bearer <token>`) or Cookie (`access_token=<token>`).
+/// Extracts access token from Authorization header (`Bearer <token>`) or Cookie (`__Host-access_token=<token>`).
 #[inline]
 fn extract_token(parts: &Parts) -> Result<&str, ApiError> {
     // 1. Authorization: Bearer <token>
@@ -271,7 +271,8 @@ fn extract_token(parts: &Parts) -> Result<&str, ApiError> {
         .map(str::trim)
         .filter(|t| !t.is_empty());
 
-    // 2. Cookie: access_token=<token>
+    // 2. Cookie: __Host-access_token=<token> (project invariants: web channel uses `__Host-` only;
+    //    the unprefixed legacy name is deliberately ignored to defeat cookie tossing)
     let cookie_token = parts
         .headers
         .get(http::header::COOKIE)
@@ -279,7 +280,7 @@ fn extract_token(parts: &Parts) -> Result<&str, ApiError> {
         .and_then(|cookies| {
             cookies
                 .split(';')
-                .filter_map(|c| c.trim().strip_prefix("access_token="))
+                .filter_map(|c| c.trim().strip_prefix("__Host-access_token="))
                 .map(str::trim)
                 .find(|t| !t.is_empty())
         });
@@ -671,6 +672,9 @@ mod tests {
         ) -> Result<DecryptedSecret, PortError> {
             Ok(DecryptedSecret::new(Vec::new()))
         }
+        fn backup_code_hash(&self, _code: &str) -> Result<String, PortError> {
+            Ok(String::new())
+        }
     }
 
     struct NoopTotp;
@@ -887,7 +891,7 @@ mod tests {
     #[test]
     fn extract_token_borrows_zero_copy_from_cookie_and_rejects_empty() -> TestResult {
         let req = Request::builder()
-            .header(COOKIE, "theme=dark; access_token=tok_123 ; other=1")
+            .header(COOKIE, "theme=dark; __Host-access_token=tok_123 ; other=1")
             .body(())?;
         let (parts, ()) = req.into_parts();
         let hdr_bytes = parts
@@ -917,7 +921,7 @@ mod tests {
     fn krg_sec_01_extract_token_rejects_hybrid_bearer_and_cookie() -> TestResult {
         let req = Request::builder()
             .header(AUTHORIZATION, "Bearer attacker.chosen.token")
-            .header(COOKIE, "access_token=victim.session.token")
+            .header(COOKIE, "__Host-access_token=victim.session.token")
             .body(())?;
         let (parts, ()) = req.into_parts();
 
@@ -943,6 +947,22 @@ mod tests {
             .err()
             .ok_or("blacklist failure must reject the request")?;
         assert_eq!(err.kind(), ErrorKind::ServiceUnavailable);
+        Ok(())
+    }
+
+    /// KRG-SEC-03: an unprefixed `access_token` cookie (settable by a sibling
+    /// subdomain via cookie tossing) must never authenticate a request.
+    #[test]
+    fn krg_sec_03_extract_token_ignores_unprefixed_access_token_cookie() -> TestResult {
+        let req = Request::builder()
+            .header(COOKIE, "access_token=tossed.by.subdomain")
+            .body(())?;
+        let (parts, ()) = req.into_parts();
+
+        let err = extract_token(&parts)
+            .err()
+            .ok_or("unprefixed cookie must not authenticate")?;
+        assert_eq!(err.kind(), ErrorKind::Unauthenticated);
         Ok(())
     }
 

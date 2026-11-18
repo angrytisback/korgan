@@ -103,7 +103,7 @@ impl EnableTotpUseCase {
         drop(secret_bytes);
 
         // Generate 10 single-use backup codes
-        let (plaintexts, hashes) = generate_backup_codes(10);
+        let (plaintexts, hashes) = generate_backup_codes(10, self.secret_cipher.as_ref())?;
 
         let mut mfa = UserMfa::new(cmd.user_id, ciphertext, nonce, hashes);
         mfa.verify(now);
