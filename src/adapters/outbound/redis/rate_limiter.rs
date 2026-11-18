@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use deadpool_redis::Pool;
-use deadpool_redis::redis::{AsyncCommands, cmd};
+use deadpool_redis::redis::{AsyncCommands, Script};
 
 use crate::ports::cache::{RateLimitStatus, RateLimiterPort};
 use crate::ports::errors::PortError;
@@ -52,6 +52,7 @@ end
 pub struct RedisRateLimiter {
     pool: Pool,
     prefix: String,
+    script: Script,
 }
 
 impl std::fmt::Debug for RedisRateLimiter {
@@ -69,6 +70,7 @@ impl RedisRateLimiter {
         Self {
             pool,
             prefix: prefix.into(),
+            script: Script::new(SLIDING_WINDOW_LUA),
         }
     }
 
@@ -110,19 +112,19 @@ impl RateLimiterPort for RedisRateLimiter {
         let window_ms = window.as_millis().max(1) as u64;
         let member = format!("{now_ms}:{}", uuid::Uuid::now_v7());
 
-        let result: (i32, i32, i64) = cmd("EVAL")
-            .arg(SLIDING_WINDOW_LUA)
-            .arg(1)
-            .arg(namespaced)
+        let result: (i32, i32, i64) = self
+            .script
+            .key(namespaced)
             .arg(now_ms)
             .arg(window_ms)
             .arg(limit)
             .arg(member)
-            .query_async(&mut conn)
+            .invoke_async(&mut conn)
             .await
             .map_err(|e| {
                 PortError::rate_limit(format!("failed to evaluate sliding window script: {e}"))
             })?;
+        drop(conn);
 
         let allowed = result.0 == 1;
         let remaining = result.1.max(0) as u32;

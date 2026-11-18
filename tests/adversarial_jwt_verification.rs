@@ -551,13 +551,13 @@ fn adversarial_typ_header_rejection_matrix() -> TestResult {
     let claims = AccessTokenClaims {
         sub: UserId::new(),
         sid: SessionId::new(),
-        iss: "http://localhost:8080".to_string(),
-        aud: "korgan".to_string(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: now.timestamp() + 3600,
         iat: now.timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: now.timestamp(),
-        amr: vec!["pwd".to_string()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
 
     // Matrix of invalid, dangerous, or cross-protocol `typ` values
@@ -665,13 +665,13 @@ fn adversarial_typ_header_acceptance_rfc9068() -> TestResult {
     let claims = AccessTokenClaims {
         sub: UserId::new(),
         sid: SessionId::new(),
-        iss: "http://localhost:8080".to_string(),
-        aud: "korgan".to_string(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: now.timestamp() + 3600,
         iat: now.timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: now.timestamp(),
-        amr: vec!["pwd".to_string()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
 
     // Both "at+jwt" and "application/at+jwt" MUST be accepted per RFC 9068 Section 2.1
@@ -722,13 +722,13 @@ fn adversarial_empty_and_whitespace_claims_rejected() -> TestResult {
         let claims = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: invalid_iss.to_string(),
-            aud: "korgan".to_string(),
+            iss: std::borrow::Cow::Borrowed(invalid_iss),
+            aud: std::borrow::Cow::Borrowed("korgan"),
             exp: now.timestamp() + 3600,
             iat: now.timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp(),
-            amr: vec!["pwd".to_string()],
+            amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
         };
 
         let header = serde_json::json!({
@@ -760,13 +760,13 @@ fn adversarial_empty_and_whitespace_claims_rejected() -> TestResult {
         let claims = AccessTokenClaims {
             sub: UserId::new(),
             sid: SessionId::new(),
-            iss: "http://localhost:8080".to_string(),
-            aud: invalid_aud.to_string(),
+            iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+            aud: std::borrow::Cow::Borrowed(invalid_aud),
             exp: now.timestamp() + 3600,
             iat: now.timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: now.timestamp(),
-            amr: vec!["pwd".to_string()],
+            amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
         };
 
         let header = serde_json::json!({
@@ -850,13 +850,13 @@ async fn adversarial_auth_user_strict_iss_matching() -> TestResult {
         let claims = AccessTokenClaims {
             sub: user.id,
             sid: session.id,
-            iss: bad_iss.to_string(),
-            aud: "korgan".to_string(),
+            iss: std::borrow::Cow::Borrowed(bad_iss),
+            aud: std::borrow::Cow::Borrowed("korgan"),
             exp: Utc::now().timestamp() + 300,
             iat: Utc::now().timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: session.created_at.timestamp(),
-            amr: vec!["pwd".to_string()],
+            amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
         };
 
         let token = ctx.jwt_service.sign_access_token(&claims)?;
@@ -939,13 +939,13 @@ async fn adversarial_auth_user_strict_aud_matching() -> TestResult {
         let claims = AccessTokenClaims {
             sub: user.id,
             sid: session.id,
-            iss: "http://localhost:8080".to_string(),
-            aud: bad_aud.to_string(),
+            iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+            aud: std::borrow::Cow::Borrowed(bad_aud),
             exp: Utc::now().timestamp() + 300,
             iat: Utc::now().timestamp(),
             jti: uuid::Uuid::now_v7().to_string(),
             auth_time: session.created_at.timestamp(),
-            amr: vec!["pwd".to_string()],
+            amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
         };
 
         let token = ctx.jwt_service.sign_access_token(&claims)?;
@@ -1009,13 +1009,13 @@ async fn adversarial_auth_user_exact_valid_tokens_succeed() -> TestResult {
     let claims = AccessTokenClaims {
         sub: user.id,
         sid: session.id,
-        iss: "http://localhost:8080".to_string(),
-        aud: "korgan".to_string(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: session.created_at.timestamp(),
-        amr: vec!["pwd".to_string()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
     let normal_token = ctx.jwt_service.sign_access_token(&claims)?;
 
@@ -1094,13 +1094,13 @@ async fn adversarial_auth_user_rejects_cross_protocol_tokens() -> TestResult {
     let claims = AccessTokenClaims {
         sub: user.id,
         sid: session.id,
-        iss: "http://localhost:8080".to_string(),
-        aud: "korgan".to_string(),
+        iss: std::borrow::Cow::Borrowed("http://localhost:8080"),
+        aud: std::borrow::Cow::Borrowed("korgan"),
         exp: Utc::now().timestamp() + 300,
         iat: Utc::now().timestamp(),
         jti: uuid::Uuid::now_v7().to_string(),
         auth_time: session.created_at.timestamp(),
-        amr: vec!["pwd".to_string()],
+        amr: smallvec::smallvec![std::borrow::Cow::Borrowed("pwd")],
     };
 
     use ed25519_dalek::SigningKey;
