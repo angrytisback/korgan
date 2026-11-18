@@ -75,6 +75,8 @@ pub struct BanUserCommand {
     pub reason: Option<String>,
     /// Identifier of the admin performing the ban.
     pub actor_id: UserId,
+    /// Role of the acting admin (as verified by the `AdminUser` extractor).
+    pub actor_role: UserRole,
 }
 
 /// Command to administratively unban a user.
@@ -84,6 +86,8 @@ pub struct UnbanUserCommand {
     pub user_id: UserId,
     /// Identifier of the admin performing the unban.
     pub actor_id: UserId,
+    /// Role of the acting admin (as verified by the `AdminUser` extractor).
+    pub actor_role: UserRole,
 }
 
 /// Result of banning a user.

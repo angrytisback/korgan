@@ -13,7 +13,7 @@ use korgan::application::dto::*;
 use korgan::application::error::AppError;
 use korgan::application::use_cases::*;
 use korgan::application::workers::{AppEvent, EventBus};
-use korgan::domain::entities::{AuditLog, Session, User, UserMfa};
+use korgan::domain::entities::{AccountStatus, AuditLog, Session, User, UserMfa, UserRole};
 use korgan::domain::value_objects::*;
 use korgan::ports::cache::{RateLimitStatus, RateLimiterPort, TokenStore};
 use korgan::ports::errors::PortError;
@@ -2990,6 +2990,7 @@ async fn test_ban_user_concurrent_with_login_race_condition() -> TestResult {
         .execute(BanUserCommand {
             user_id,
             actor_id: UserId::new(),
+            actor_role: korgan::domain::entities::UserRole::Admin,
             reason: Some("Violation of ToS".to_owned()),
         })
         .await?;
@@ -3105,6 +3106,7 @@ async fn test_ban_user_concurrent_with_refresh_race_condition() -> TestResult {
         .execute(BanUserCommand {
             user_id,
             actor_id: UserId::new(),
+            actor_role: korgan::domain::entities::UserRole::Admin,
             reason: Some("Compromised account".to_owned()),
         })
         .await?;
@@ -4391,5 +4393,135 @@ async fn test_refresh_single_session_replay_uses_single_blacklist_fast_path() ->
             .await?,
         Some("revoked".to_owned())
     );
+    Ok(())
+}
+
+// --- KRG-SEC-13: admin ban/unban privilege hierarchy and granular status updates ---
+
+async fn ban_harness(
+    target_role: UserRole,
+    target_status: AccountStatus,
+    verified: bool,
+) -> Result<
+    (
+        Arc<MockUserRepository>,
+        BanUserUseCase,
+        korgan::application::use_cases::admin::UnbanUserUseCase,
+        UserId,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let user_repo = Arc::new(MockUserRepository::default());
+    let session_repo = Arc::new(MockSessionRepository::default());
+    session_repo.set_user_repo(user_repo.clone());
+    let token_store = Arc::new(MockTokenStore::default());
+    let (event_bus, _rx) = EventBus::new(100);
+
+    let mut target = User::new(EmailAddress::parse("target@example.com")?, None, None);
+    target.status = target_status;
+    target.role = target_role;
+    if verified {
+        target.email_verified_at = Some(chrono::Utc::now());
+    }
+    user_repo.create(&target).await?;
+
+    let ban = BanUserUseCase::new(
+        user_repo.clone(),
+        session_repo.clone(),
+        token_store,
+        event_bus.clone(),
+    );
+    let unban =
+        korgan::application::use_cases::admin::UnbanUserUseCase::new(user_repo.clone(), event_bus);
+    Ok((user_repo, ban, unban, target.id))
+}
+
+#[tokio::test]
+async fn test_admin_cannot_ban_self_peer_or_superadmin() -> TestResult {
+    for target_role in [UserRole::Admin, UserRole::Superadmin] {
+        let (repo, ban, _unban, target_id) =
+            ban_harness(target_role, AccountStatus::Active, true).await?;
+        let res = ban
+            .execute(BanUserCommand {
+                user_id: target_id,
+                actor_id: UserId::new(),
+                actor_role: UserRole::Admin,
+                reason: None,
+            })
+            .await;
+        assert!(matches!(res, Err(AppError::Forbidden)), "{target_role:?}");
+        let after = repo.find_by_id(&target_id).await?.ok_or("missing")?;
+        assert_eq!(after.status, AccountStatus::Active);
+    }
+
+    // Self-ban is refused even for a superadmin.
+    let (repo, ban, _unban, target_id) =
+        ban_harness(UserRole::Superadmin, AccountStatus::Active, true).await?;
+    let res = ban
+        .execute(BanUserCommand {
+            user_id: target_id,
+            actor_id: target_id,
+            actor_role: UserRole::Superadmin,
+            reason: None,
+        })
+        .await;
+    assert!(matches!(res, Err(AppError::Forbidden)));
+    let after = repo.find_by_id(&target_id).await?.ok_or("missing")?;
+    assert_eq!(after.status, AccountStatus::Active);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_superadmin_can_ban_admin() -> TestResult {
+    let (repo, ban, _unban, target_id) =
+        ban_harness(UserRole::Admin, AccountStatus::Active, true).await?;
+    let res = ban
+        .execute(BanUserCommand {
+            user_id: target_id,
+            actor_id: UserId::new(),
+            actor_role: UserRole::Superadmin,
+            reason: None,
+        })
+        .await?;
+    assert!(res.banned);
+    let after = repo.find_by_id(&target_id).await?.ok_or("missing")?;
+    assert_eq!(after.status, AccountStatus::Suspended);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_unban_never_bypasses_email_verification_and_requires_suspended() -> TestResult {
+    use korgan::application::dto::UnbanUserCommand;
+
+    // Never-verified account: ban then unban must land on Unverified, not Active.
+    let (repo, ban, unban, target_id) =
+        ban_harness(UserRole::User, AccountStatus::Unverified, false).await?;
+    ban.execute(BanUserCommand {
+        user_id: target_id,
+        actor_id: UserId::new(),
+        actor_role: UserRole::Admin,
+        reason: None,
+    })
+    .await?;
+    let res = unban
+        .execute(UnbanUserCommand {
+            user_id: target_id,
+            actor_id: UserId::new(),
+            actor_role: UserRole::Admin,
+        })
+        .await?;
+    assert_eq!(res.status, AccountStatus::Unverified);
+    let after = repo.find_by_id(&target_id).await?.ok_or("missing")?;
+    assert_eq!(after.status, AccountStatus::Unverified);
+
+    // Unbanning an account that is not suspended is a conflict, not a silent activation.
+    let res = unban
+        .execute(UnbanUserCommand {
+            user_id: target_id,
+            actor_id: UserId::new(),
+            actor_role: UserRole::Admin,
+        })
+        .await;
+    assert!(matches!(res, Err(AppError::Conflict)));
     Ok(())
 }

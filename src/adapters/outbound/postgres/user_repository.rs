@@ -1,13 +1,13 @@
 //! PostgreSQL implementation of [`UserRepository`] with compile-time verified queries.
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sqlx::{Connection, PgPool};
 use uuid::Uuid;
 
 use crate::adapters::outbound::postgres::db::DbConn;
 use crate::adapters::outbound::postgres::models::{PgAccountStatus, UserMfaRow, UserRow};
-use crate::domain::entities::{User, UserMfa};
+use crate::domain::entities::{AccountStatus, User, UserMfa};
 use crate::domain::value_objects::{EmailAddress, PasswordHash, UserId, Username};
 use crate::ports::errors::PortError;
 use crate::ports::repositories::UserRepository;
@@ -455,6 +455,36 @@ impl UserRepository for PostgresUserRepository {
         .map_err(|e| Self::map_sqlx_error(e, "save_mfa"))?;
 
         Ok(())
+    }
+
+    async fn set_status_if(
+        &self,
+        id: &UserId,
+        expected: AccountStatus,
+        new: AccountStatus,
+        now: DateTime<Utc>,
+    ) -> Result<bool, PortError> {
+        let mut conn = self.conn().await?;
+        let expected_pg: PgAccountStatus = expected.into();
+        let new_pg: PgAccountStatus = new.into();
+
+        let result = sqlx::query(
+            r#"
+            UPDATE users SET
+                status = $3,
+                updated_at = $4
+            WHERE id = $1 AND status = $2
+            "#,
+        )
+        .bind(id.to_uuid())
+        .bind(expected_pg)
+        .bind(new_pg)
+        .bind(now)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| Self::map_sqlx_error(e, "set_status_if"))?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     async fn enable_mfa(&self, mfa: &UserMfa) -> Result<(), PortError> {

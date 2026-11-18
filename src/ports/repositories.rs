@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::domain::entities::{
-    AuditLog, OAuthAccount, OAuthProvider, Passkey, Session, User, UserMfa,
+    AccountStatus, AuditLog, OAuthAccount, OAuthProvider, Passkey, Session, User, UserMfa,
 };
 use crate::domain::value_objects::{
     EmailAddress, PasskeyId, PasswordHash, SessionId, TokenFamilyId, UserId, Username,
@@ -75,6 +75,30 @@ pub trait UserRepository: Send + Sync + 'static {
             self.update(&user).await?;
         }
         Ok(())
+    }
+
+    /// Atomically transitions `status` from `expected` to `new` without touching
+    /// any other column (compare-and-set). Returns `false` when the row is
+    /// missing or its status is no longer `expected`.
+    ///
+    /// Granular by design (project invariants): administrative status changes must
+    /// not overwrite concurrent password, MFA or profile mutations.
+    async fn set_status_if(
+        &self,
+        id: &UserId,
+        expected: AccountStatus,
+        new: AccountStatus,
+        now: DateTime<Utc>,
+    ) -> Result<bool, PortError> {
+        match self.find_by_id(id).await? {
+            Some(mut user) if user.status == expected => {
+                user.status = new;
+                user.updated_at = now;
+                self.update(&user).await?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Removes MFA configuration and disables MFA on the user record.

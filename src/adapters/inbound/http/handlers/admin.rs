@@ -242,6 +242,7 @@ pub async fn ban_user(
         user_id,
         reason,
         actor_id: admin.user_id,
+        actor_role: admin.role,
     };
 
     let result = state.ban_user_use_case.execute(cmd).await?;
@@ -282,6 +283,7 @@ pub async fn unban_user(
     let cmd = UnbanUserCommand {
         user_id,
         actor_id: admin.user_id,
+        actor_role: admin.role,
     };
 
     let result = state.unban_user_use_case.execute(cmd).await?;
