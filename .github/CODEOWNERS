@@ -1,12 +1,12 @@
 # Global code owners
-* @eigen
+* @angrytisback
 
 # Core security & cryptography critical paths
-/src/domain/ @eigen
-/src/adapters/outbound/crypto/ @eigen
-/migrations/ @eigen
-/.sqlx/ @eigen
+/src/domain/ @angrytisback
+/src/adapters/outbound/crypto/ @angrytisback
+/migrations/ @angrytisback
+/.sqlx/ @angrytisback
 
 # CI/CD and release automation
-/.github/ @eigen
-/Dockerfile @eigen
+/.github/ @angrytisback
+/Dockerfile @angrytisback
