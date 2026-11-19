@@ -1,0 +1,7 @@
+name: korgan CodeQL config
+# Test, fuzz and benchmark code uses fixed keys and prints diagnostics on
+# purpose; none of it ships in the release binary.
+paths-ignore:
+  - tests
+  - fuzz
+  - benches
