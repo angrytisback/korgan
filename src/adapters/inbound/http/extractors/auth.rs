@@ -271,7 +271,7 @@ fn extract_token(parts: &Parts) -> Result<&str, ApiError> {
         .map(str::trim)
         .filter(|t| !t.is_empty());
 
-    // 2. Cookie: __Host-access_token=<token> (project invariants: web channel uses `__Host-` only;
+    // 2. Cookie: __Host-access_token=<token> (project security invariants: web channel uses `__Host-` only;
     //    the unprefixed legacy name is deliberately ignored to defeat cookie tossing)
     let cookie_token = parts
         .headers
@@ -937,7 +937,7 @@ mod tests {
     }
 
     /// KRG-SEC-04: a Redis outage during the blacklist lookup must fail closed
-    /// with 503 (project invariants), not a generic 500.
+    /// with 503 (project security invariants), not a generic 500.
     #[tokio::test]
     async fn krg_sec_04_blacklist_cache_failure_returns_service_unavailable() -> TestResult {
         let (state, _) = build_test_state(true, false, true)?;

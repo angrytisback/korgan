@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-19
+
 ### Security
 - Closed 18 findings from the internal security audit (KRG-SEC-01..18): MFA factor
   replacement now requires step-up and refuses to overwrite an existing factor,
@@ -18,6 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** state-changing web requests are subject to an `Origin` check.
 - **Breaking:** MFA backup codes are stored as HMAC digests.
 
-## [0.1.0]
+## [0.25.1] - 2026-11-09
 
-Initial development version.
+Previous public release.
