@@ -1,0 +1,16 @@
+# Normalise line endings; the repository is LF-only.
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.ico binary
+
+# Generated files: collapsed in diffs and excluded from language statistics.
+Cargo.lock linguist-generated=true -diff
+.sqlx/*.json linguist-generated=true -diff
+
+*.rs diff=rust

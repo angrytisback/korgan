@@ -58,3 +58,12 @@ yarn-error.log*
 fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
+
+# Coverage, profiling and benchmark output
+coverage/
+lcov.info
+*.profraw
+*.profdata
+perf.data*
+flamegraph.svg
+criterion/
