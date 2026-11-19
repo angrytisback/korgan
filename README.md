@@ -314,7 +314,7 @@ All CI/CD checks pass locally with zero warnings and zero errors under strict de
 | Code Formatting | cargo fmt --all -- --check | Asserts compliance with standard Rust formatting | Clean (0 diff) |
 | Static Analysis & Lints | SQLX_OFFLINE=true cargo clippy --all-targets --all-features -- -D warnings | Denies all warnings, clippy panics, and unwrap/expect calls | Clean (0 warnings, 0 errors) |
 | Dependency Vulnerability Audit | cargo audit --deny warnings | Scans Cargo.lock against the RustSec Advisory Database | Clean (0 vulnerabilities across 455 crates) |
-| Comprehensive Test Suite | SQLX_OFFLINE=true cargo test | Executes all unit, integration, concurrency, and E2E test suites | 279 / 279 Passed (100% success rate) |
+| Comprehensive Test Suite | SQLX_OFFLINE=true cargo test | Executes all unit, integration, concurrency, and E2E test suites | 383 passed, 0 failed (plus 16 real-PostgreSQL tests run with `make test-db`) |
 
 --------------------------------------------------------------------------------
 
