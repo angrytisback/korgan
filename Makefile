@@ -5,7 +5,7 @@ export SQLX_OFFLINE := true
 # Keep in sync with `rust-version` in Cargo.toml.
 MSRV := 1.94
 
-.PHONY: help build test test-arm64 build-arm64-musl test-db bench-db lint fmt fmt-check doc boundaries audit msrv check run
+.PHONY: ci deny secrets workflows help build test test-arm64 build-arm64-musl test-db bench-db lint fmt fmt-check doc boundaries audit msrv check run
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST)
@@ -51,6 +51,18 @@ audit: ## Advisory scan of Cargo.lock (needs cargo-audit)
 
 msrv: ## Check against the declared rust-version (needs that toolchain installed)
 	cargo +$(MSRV) check --locked --all-targets
+
+deny: ## Supply-chain bans, licenses and advisories (needs cargo-deny)
+	cargo deny check
+
+secrets: ## Secret scan of the full git history (needs gitleaks)
+	gitleaks git . --config .gitleaks.toml --redact --no-banner
+
+workflows: ## Lint GitHub Actions workflows (needs actionlint and zizmor)
+	actionlint
+	zizmor --no-progress .github/workflows
+
+ci: check msrv audit deny secrets workflows ## Local equivalent of every CI and security gate
 
 check: fmt-check lint boundaries doc test ## Everything CI runs, except audit and msrv
 
