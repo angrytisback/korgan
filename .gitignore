@@ -22,7 +22,11 @@ target/
 *.crt
 
 # Internal Agent Workspaces & Scratchpad
+.agent/
 .agents/
+CRITICAL_BLOCKERS.md
+PROJECT.md
+ORIGINAL_REQUEST.md
 .gemini/
 .antigravity/
 .abacus/
@@ -63,3 +67,12 @@ yarn-error.log*
 fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
+
+# Coverage, profiling and benchmark output
+coverage/
+lcov.info
+*.profraw
+*.profdata
+perf.data*
+flamegraph.svg
+criterion/

@@ -1,0 +1,28 @@
+# Gitleaks configuration. Extends the default ruleset; every allowlist entry
+# below is a verified false positive (documentation placeholders or public test
+# fixtures) and is matched by exact value, never by whole path.
+title = "korgan gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Throw-away Ed25519 PKCS#8 keys used only by unit/integration tests (src/**/#[cfg(test)] and tests/). They protect nothing and are never loaded in production."
+regexes = [
+  '''MC4CAQAwBQYDK2VwBCIEIFSBy32VLsvjiPTGXm9ph2VZP5r6FjDhPLO303Qtn3P7''',
+  '''MC4CAQAwBQYDK2VwBCIEIGmqS8Rrsu1ezj6/r3jUR68wWBl0WT1xiexK/QbsuPjc''',
+  '''MC4CAQAwBQYDK2VwBCIEIK\+cT8yvQ5p\+zU1L7nU4mHw9sVb6\+Qe8b\+W0p0m0h1xY''',
+]
+
+[[allowlists]]
+description = "Truncated example refresh tokens in the documentation (end with '...', not real tokens)."
+regexes = [
+  '''0192a8f07c1b700080001a2b3c4d5e6f''',
+  '''0192a8f3524b700080009876543210ab''',
+]
+
+[[allowlists]]
+description = "Static WebAuthn authenticatorData blob from a recorded test vector in tests/."
+regexes = [
+  '''SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MBAAAAeQ''',
+]
