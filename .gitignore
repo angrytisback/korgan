@@ -27,6 +27,12 @@ target/
 CRITICAL_BLOCKERS.md
 PROJECT.md
 ORIGINAL_REQUEST.md
+AGENTS.md
+CLAUDE.md
+.claude/
+docs/02_MUST_FOLLOW_RULES.md
+docs/03_STRICT_ANTI_PATTERNS.md
+docs/04_ARCHITECTURE_SPEC_AND_PROMPTS.md
 .gemini/
 .antigravity/
 .abacus/

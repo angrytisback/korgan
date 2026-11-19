@@ -1,6 +1,6 @@
 [package]
 name = "korgan"
-version = "0.1.0"
+version = "0.26.0"
 edition = "2024"
 rust-version = "1.94"
 description = "Enterprise-grade, self-hosted Identity and Access Management (IAM) & User Management API"

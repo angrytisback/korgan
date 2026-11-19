@@ -7,8 +7,8 @@ Only the versions below receive security updates.
 | Version | Supported          |
 | ------- | ------------------ |
 | `main`  | :white_check_mark: |
-| 0.1.x   | :white_check_mark: |
-| < 0.1   | :x:                |
+| 0.26.x  | :white_check_mark: |
+| < 0.26  | :x:                |
 
 ---
 
@@ -16,7 +16,12 @@ Only the versions below receive security updates.
 
 **Do NOT report security vulnerabilities through public GitHub issues, discussions, or pull requests.**
 
-Send a private report to **security@yigitturan.com**. You may also use GitHub's [Private Vulnerability Reporting](https://github.com/angrytisback/korgan/security/advisories/new).
+Send a private report to **eigen@teapot-dev.com**. You may also use GitHub's [Private Vulnerability Reporting](https://github.com/angrytisback/korgan/security/advisories/new).
+
+Encrypt sensitive reports with our PGP key:
+
+- **Fingerprint:** `E0FA 4474 777E 2409 59F8  F392 549F 37FB 25E1 75A5`
+- **Public key:** [`.github/pgp-public-key.asc`](https://github.com/angrytisback/korgan/blob/main/.github/pgp-public-key.asc)
 
 ### What to Include in Your Report
 

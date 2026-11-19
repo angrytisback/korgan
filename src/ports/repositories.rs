@@ -81,7 +81,7 @@ pub trait UserRepository: Send + Sync + 'static {
     /// any other column (compare-and-set). Returns `false` when the row is
     /// missing or its status is no longer `expected`.
     ///
-    /// Granular by design (project invariants): administrative status changes must
+    /// Granular by design (project concurrency invariants): administrative status changes must
     /// not overwrite concurrent password, MFA or profile mutations.
     async fn set_status_if(
         &self,
