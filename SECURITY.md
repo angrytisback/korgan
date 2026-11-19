@@ -16,12 +16,7 @@ Only the versions below receive security updates.
 
 **Do NOT report security vulnerabilities through public GitHub issues, discussions, or pull requests.**
 
-Send a private report to **security@yigitturan.com**. GitHub's Private Vulnerability Reporting feature may also be used.
-
-Encrypt sensitive reports with our PGP key:
-
-- **Key ID / Fingerprint:** `[PGP-FINGERPRINT-PLACEHOLDER]`
-- **Public key:** `[LINK-TO-PUBLIC-KEY-PLACEHOLDER]`
+Send a private report to **security@yigitturan.com**. You may also use GitHub's [Private Vulnerability Reporting](https://github.com/angrytisback/korgan/security/advisories/new).
 
 ### What to Include in Your Report
 

@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a reproducible defect in Korgan
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security issue?** Do NOT file it here. Follow [SECURITY.md](https://github.com/angrytisback/korgan/blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Korgan version / commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Deployment (Docker image tag, binary, source build), OS / architecture, PostgreSQL and Redis versions, relevant configuration (redact secrets).
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the HTTP status and response body if relevant. Never paste tokens, passwords or keys.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. ...\n2. ..."
+    validations:
+      required: true
